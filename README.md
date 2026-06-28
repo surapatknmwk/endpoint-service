@@ -15,7 +15,7 @@ endpoint-services (single Spring Boot app, port 8080)
 ├── com.core     → Core / Orders module
 ├── com.master   → Master Data module
 ├── com.search   → Order Search module
-└── com.common   → Shared cross-module code (ApiResponse, ApiClient, SecurityFilter, exceptions)
+└── com.common   → Shared cross-module code (ApiResponse, SecurityFilter, exceptions)
 ```
 
 Each module has its own API path prefix:
@@ -27,8 +27,9 @@ Each module has its own API path prefix:
 | Master Data | `localhost:8080/endpoint-master-service` |
 | Order Search | `localhost:8080/endpoint-search-service` |
 
-Inter-module calls (e.g. core → authen to validate a token, search → master
-for address lookups) go over HTTP to `localhost:8080`.
+Inter-module calls (e.g. core to authen for token validation, core/search to
+master for address lookups) are plain in-process Spring bean calls -- all 4
+modules run in the same JVM/app, so there's no HTTP round trip between them.
 
 ## Project layout
 
@@ -40,7 +41,6 @@ src/main/java/com/
 ├── common/                                ← Shared code used by all 4 modules
 │   ├── dto/          ApiResponse (standard response wrapper, all modules)
 │   ├── exception/    InvalidTokenException, TokenExpiredException, InvalidRequestBodyException
-│   ├── component/    ApiClient (generic REST helper, used by core + search)
 │   ├── config/        CacheConfig (shared CacheManager: permissionCache + masterDataCache)
 │   └── filter/        SecurityFilter (single filter covering all 3 path-prefixed
 │                       modules; branches internally for core's permission check
@@ -59,10 +59,11 @@ src/main/java/com/
 ├── core/                                  ← Core (Orders) module
 │   ├── controller/       OrderController
 │   ├── service/           OrderService, security/SecurityService, clients/MasterDataService
+│   │                       (calls master module's repositories/AddressService directly,
+│   │                        in-process — no HTTP)
 │   ├── entity/            Order, Customer, OrderAddress, DeliveryJob, DeliveryRouting
 │   ├── repository/        OrderRepository, CustomerRepository, ...
-│   ├── config/            RestTemplateConfig (shared RestTemplate)
-│   ├── dto/                OrderRequest/Response, master/* (DTOs for calling master module)
+│   ├── dto/                OrderRequest/Response, master/* (DTOs mirroring master module's data)
 │   └── exception/          GlobalExceptionHandler
 │
 ├── master/                                ← Master Data module
@@ -75,6 +76,7 @@ src/main/java/com/
 └── search/                                ← Order Search module
     ├── controller/        OrderSearchController
     ├── service/            OrderSearchService (dynamic Specification-based search), clients/MasterDataService
+    │                        (calls master module's AddressService directly, in-process — no HTTP)
     ├── entity/              Order, Customer, OrderAddress, DeliveryJob, DeliveryRouting
     │                        (mapped with @Entity(name="Search...") to avoid clashing
     │                         with core's entities of the same table)
@@ -112,8 +114,8 @@ OpenAPI spec: `http://localhost:8080/v3/api-docs`
 - **Bean name collisions** (`MasterDataService`, `GlobalExceptionHandler` exist in
   multiple packages) → resolved with `FullyQualifiedAnnotationBeanNameGenerator` in
   `EndpointServicesApplication`, so beans are named by their full class path instead
-  of simple name. `ApiClient` and `SecurityFilter` are each defined once, as shared
-  beans in `com.common`, so there's no collision to resolve for those.
+  of simple name. `SecurityFilter` is defined once, as a shared bean in `com.common`,
+  so there's no collision to resolve for that.
 - **Duplicate JPA entity names** — `core` and `search` each have their own
   `Order`/`Customer`/`OrderAddress`/`DeliveryJob`/`DeliveryRouting` mapped to the same
   DB tables but with slightly different fields. The `search` side entities are given an
@@ -128,11 +130,14 @@ OpenAPI spec: `http://localhost:8080/v3/api-docs`
   search's JWT `sub`-claim extraction) is handled via path-prefix branching inside the
   filter. The authentication module's Spring Security chain is scoped separately via
   `.securityMatcher("/endpoint-authen-service/**")`.
-- **One shared `ApiResponse` / `ApiClient` / exception set** (`com.common.dto`,
-  `com.common.component`, `com.common.exception`) — the standard response wrapper,
-  the generic REST helper used by `core`/`search` for calling the master module, and
-  `InvalidTokenException`/`TokenExpiredException`/`InvalidRequestBodyException` are
-  defined once and reused by all modules.
+- **One shared `ApiResponse` / exception set** (`com.common.dto`, `com.common.exception`)
+  — the standard response wrapper and `InvalidTokenException`/`TokenExpiredException`/
+  `InvalidRequestBodyException` are defined once and reused by all modules.
+- **No internal HTTP calls between modules** — `core`'s and `search`'s `MasterDataService`
+  (in `clients/`) inject `master`'s repositories/`AddressService` directly as Spring
+  beans instead of going through `RestTemplate`/`ApiClient`, since all 4 modules run in
+  the same JVM. The `service.master.url` / `SERVICE_MASTER_URL` config entries are now
+  unused leftovers.
 - **Exception handlers** — each `GlobalExceptionHandler` is scoped with
   `@RestControllerAdvice(basePackages = "...")` to its own module's controller
   package, but they all build responses from the shared `com.common.dto.ApiResponse`

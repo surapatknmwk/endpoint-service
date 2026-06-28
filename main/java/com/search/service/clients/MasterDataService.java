@@ -1,30 +1,26 @@
 package com.search.service.clients;
 
-import com.common.component.ApiClient;
 import com.common.config.CacheConfig;
+import com.master.service.AddressService;
 import com.search.dto.master.AddressInfoDto;
-import com.search.dto.master.MasterApiResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cache.annotation.Cacheable;
-import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Service;
 
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
+/**
+ * เรียกข้อมูล address แบบ in-process ผ่าน master module โดยตรง
+ * (master, core, search อยู่ใน Spring Boot application เดียวกัน จึงไม่ต้องยิง HTTP ออกไปอีก service)
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class MasterDataService {
 
-    private final ApiClient apiClient;
-
-    @Value("${service.master.url}")
-    private String masterServiceUrl;
+    private final AddressService addressService;
 
     @Cacheable(value = CacheConfig.MASTER_DATA_CACHE, key = "#provinceCode + '-' + #districtCode + '-' + #subdistrictCode")
     public AddressInfoDto getCache(String provinceCode, String districtCode, String subdistrictCode) {
@@ -35,27 +31,7 @@ public class MasterDataService {
     @Cacheable(value = CacheConfig.MASTER_DATA_CACHE, key = "#provinceCode + '-' + #districtCode + '-' + #subdistrictCode")
     public AddressInfoDto getAddressInfoSafe(String provinceCode, String districtCode, String subdistrictCode) {
         try {
-            String url = masterServiceUrl + "/api/address/info";
-            Map<String, Object> queryParams = new HashMap<>();
-            if (provinceCode != null) {
-                queryParams.put("provinceCode", provinceCode);
-            }
-            if (districtCode != null) {
-                queryParams.put("districtCode", districtCode);
-            }
-            if (subdistrictCode != null) {
-                queryParams.put("subdistrictCode", subdistrictCode);
-            }
-
-            MasterApiResponse<AddressInfoDto> response = apiClient.get(
-                    url, null, queryParams,
-                    new ParameterizedTypeReference<MasterApiResponse<AddressInfoDto>>() {}
-            ).orElse(null);
-
-            if (response != null && response.isSuccess()) {
-                return response.getData();
-            }
-            return null;
+            return toAddressInfoDto(addressService.getAddressInfo(provinceCode, districtCode, subdistrictCode));
         } catch (Exception e) {
             log.error("Error fetching address info: provinceCode={}, districtCode={}, subdistrictCode={}",
                     provinceCode, districtCode, subdistrictCode, e);
@@ -65,20 +41,24 @@ public class MasterDataService {
 
     public List<AddressInfoDto> getAddressInfoBySubdistrictCodeBatch(Collection<String> subdistrictCodes) {
         try {
-            String url = masterServiceUrl + "/api/address/info/subdistrict-code/batch";
-
-            MasterApiResponse<List<AddressInfoDto>> response = apiClient.post(
-                    url, null, subdistrictCodes,
-                    new ParameterizedTypeReference<MasterApiResponse<List<AddressInfoDto>>>() {}
-            ).orElse(null);
-
-            if (response != null && response.isSuccess()) {
-                return response.getData();
-            }
-            return List.of();
+            return addressService.getFullAddressInfoBySubdistrictCodeBatch(subdistrictCodes).stream()
+                    .map(this::toAddressInfoDto)
+                    .toList();
         } catch (Exception e) {
             log.error("Error fetching batch address info by subdistrict ids: {}", e.getMessage(), e);
             return List.of();
         }
+    }
+
+    private AddressInfoDto toAddressInfoDto(com.master.dto.AddressInfoDto source) {
+        return AddressInfoDto.builder()
+                .provinceCode(source.getProvinceCode())
+                .provinceName(source.getProvinceName())
+                .districtCode(source.getDistrictCode())
+                .districtName(source.getDistrictName())
+                .subdistrictCode(source.getSubdistrictCode())
+                .subdistrictName(source.getSubdistrictName())
+                .zipCode(source.getZipCode())
+                .build();
     }
 }
