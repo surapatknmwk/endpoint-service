@@ -7,7 +7,7 @@
 # =====================================================================
 
 server:
-  port: 8080
+  port: 8081
 
 spring:
   application:
@@ -63,15 +63,6 @@ security:
 # Still consumed independently by com.core.service.security.SecurityService;
 # token.prefix intentionally omitted so the default "Bearer " (with trailing
 # space) is used, matching the original core SecurityService behaviour.
-
-# ---- Inter-module calls now target this same application ----
-service:
-  authen:
-    url: http://localhost:8080/endpoint-authen-service
-  master:
-    url: http://localhost:8080/endpoint-master-service
-  core:
-    url: http://localhost:8080/endpoint-core-service
 
 # ---- Search module tuning ----
 search:
