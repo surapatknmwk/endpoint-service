@@ -1,0 +1,112 @@
+# =====================================================================
+# Consolidated Endpoint Services - default (local) profile
+# Merges authen + core + master + search into a single Spring Boot app.
+# Each module keeps its original API paths via a per-module path prefix
+# (/endpoint-authen-service, /endpoint-core-service, ...), so the app runs
+# at the root context path on a single port.
+# =====================================================================
+
+server:
+  port: 8081
+
+spring:
+  application:
+    name: endpoint-services
+
+  # Shared PostgreSQL database (all modules used the same endpoint_db)
+  datasource:
+    url: jdbc:postgresql://localhost:5433/endpoint_db
+    username: admin
+    password: admin123
+    driver-class-name: org.postgresql.Driver
+    type: com.zaxxer.hikari.HikariDataSource
+    hikari:
+      pool-name: EndpointServicesHikariPool
+      minimum-idle: 5
+      maximum-pool-size: 30
+      idle-timeout: 30000
+      max-lifetime: 1800000
+      connection-timeout: 30000
+      auto-commit: true
+
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      # Two read models (core + search) map onto the same physical tables,
+      # so schema management is left to the database.
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        default_batch_fetch_size: 100
+        jdbc:
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+
+# ---- JWT (authentication module) ----
+jwt:
+  secret: YourSuperSecretKeyThatIsAtLeast256BitsLongForHS256Algorithm
+  expiration: 3600000
+
+# ---- Security filter (shared across core + master + search modules) ----
+security:
+  filter:
+    enabled: true
+    token:
+      header: Authorization
+      prefix: Bearer
+
+# ---- API filter token prefix ----
+# Still consumed independently by com.core.service.security.SecurityService;
+# token.prefix intentionally omitted so the default "Bearer " (with trailing
+# space) is used, matching the original core SecurityService behaviour.
+
+# ---- Inter-module calls now target this same application ----
+service:
+  authen:
+    url: http://localhost:8080/endpoint-authen-service
+  master:
+    url: http://localhost:8080/endpoint-master-service
+  core:
+    url: http://localhost:8080/endpoint-core-service
+
+# ---- Search module tuning ----
+search:
+  default-page-size: 20
+  max-page-size: 100
+  enable-fuzzy-search: true
+  min-search-length: 2
+
+# ---- Actuator ----
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+# ---- OpenAPI / Swagger ----
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    enabled: true
+    operations-sorter: method
+    tags-sorter: alpha
+    disable-swagger-default-url: true
+
+# ---- Logging ----
+logging:
+  level:
+    root: INFO
+    com.search: DEBUG
+    org.springframework.data: INFO
+    org.hibernate.SQL: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
