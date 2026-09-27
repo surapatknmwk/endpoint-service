@@ -5,6 +5,13 @@
 
 server:
   port: ${SERVER_PORT:8080}
+  # Bind to loopback only -- the reverse proxy (Caddy) is the only public entry point.
+  address: ${SERVER_ADDRESS:127.0.0.1}
+  # Sized for a small single-VPS deployment (default is 200 threads).
+  tomcat:
+    threads:
+      max: 50
+      min-spare: 5
 
 spring:
   application:
@@ -18,8 +25,8 @@ spring:
     type: com.zaxxer.hikari.HikariDataSource
     hikari:
       pool-name: EndpointServicesHikariPool
-      minimum-idle: 5
-      maximum-pool-size: 30
+      minimum-idle: 2
+      maximum-pool-size: 10
       idle-timeout: 30000
       max-lifetime: 1800000
       connection-timeout: 30000
@@ -72,10 +79,11 @@ management:
 
 springdoc:
   api-docs:
+    enabled: false
     path: /v3/api-docs
   swagger-ui:
     path: /swagger-ui.html
-    enabled: true
+    enabled: false
     operations-sorter: method
     tags-sorter: alpha
     disable-swagger-default-url: true

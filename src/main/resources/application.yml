@@ -70,7 +70,7 @@ security:
 # environment before starting the app.
 google:
   maps:
-    api-key: AIzaSyDLIq2rMvDWLqJJJ1a_ZbSYICAD1ekFJNs
+    api-key: ${GOOGLE_MAPS_API_KEY:}
     routes-base-url: https://routes.googleapis.com
     # ค่าเริ่มต้นของเพดานจำนวนครั้งที่ยิง Google Routes API จริงต่อวัน (วันตามเวลา Asia/Bangkok) — ใช้เมื่อตาราง
     # configuration ไม่มีแถว code 'GR_DAILY' (หรือไม่ active/ค่าไม่ถูกต้อง) ค่าจริงแก้ได้ตลอดที่ configuration.value_1
