@@ -29,13 +29,22 @@ public class DeliveryJob {
     @Column(name = "job_name", length = 255)
     private String jobName;
 
+    @Column(name = "origin_subdistrict_code", length = 10)
+    private String originSubdistrictCode;
+
+    @Column(name = "origin_district_code", length = 10)
+    private String originDistrictCode;
+
+    @Column(name = "origin_province_code", length = 10)
+    private String originProvinceCode;
+
     @Column(name = "total_orders")
     @Builder.Default
     private Integer totalOrders = 0;
 
     @Column(name = "delivery_status", length = 20)
     @Builder.Default
-    private String deliveryStatus = "new";
+    private String deliveryStatus = "NEW";
 
     @Column(name = "status", length = 1)
     @Builder.Default

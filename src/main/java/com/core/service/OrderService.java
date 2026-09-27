@@ -54,7 +54,7 @@ public class OrderService {
                 .sequenceNo(request.getSequenceNo() != null ? request.getSequenceNo() : 1)
                 .detail(request.getDetail())
                 .remark(request.getRemark())
-                .orderStatus(request.getOrderStatus() != null ? request.getOrderStatus() : "new")
+                .orderStatus(request.getOrderStatus() != null ? request.getOrderStatus() : "NEW")
                 .createdBy(username)
                 .build();
 
@@ -68,6 +68,14 @@ public class OrderService {
 
         Order order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
+
+        String currentStatus = order.getOrderStatus();
+        if ("COMPLETED".equals(currentStatus) || "CANCELLED".equals(currentStatus)) {
+            throw new IllegalArgumentException(
+                    "Order " + orderId + " has status " + currentStatus + " and cannot be edited");
+        }
+        // PENDING/IN_TRANSIT อยู่ระหว่างจัดส่งแล้ว ห้ามแก้ที่อยู่เพราะกระทบการคำนวณระยะทางของ job
+        boolean locationLocked = "PENDING".equals(currentStatus) || "IN_TRANSIT".equals(currentStatus);
 
         // Update customer
         Customer customer = order.getCustomer();
@@ -84,10 +92,12 @@ public class OrderService {
         // Update address
         OrderAddress address = order.getAddress();
         address.setAddressLine(request.getAddress().getAddressLine());
-        address.setSubdistrictCode(request.getAddress().getSubdistrictCode());
-        address.setDistrictCode(request.getAddress().getDistrictCode());
-        address.setProvinceCode(request.getAddress().getProvinceCode());
-        address.setZipCode(request.getAddress().getZipCode());
+        if (!locationLocked) {
+            address.setSubdistrictCode(request.getAddress().getSubdistrictCode());
+            address.setDistrictCode(request.getAddress().getDistrictCode());
+            address.setProvinceCode(request.getAddress().getProvinceCode());
+            address.setZipCode(request.getAddress().getZipCode());
+        }
         address.setMapLink(request.getAddress().getMapLink());
         address.setUpdatedBy(username);
         orderAddressRepository.save(address);
@@ -102,7 +112,8 @@ public class OrderService {
         order.setSequenceNo(request.getSequenceNo() != null ? request.getSequenceNo() : order.getSequenceNo());
         order.setDetail(request.getDetail());
         order.setRemark(request.getRemark());
-        order.setOrderStatus(request.getOrderStatus() != null ? request.getOrderStatus() : order.getOrderStatus());
+        // orderStatus ไม่รับจาก request — เปลี่ยนได้เฉพาะผ่าน complete/cancel และ JobService
+        // (ไม่งั้นแก้ order ที่อยู่ใน job จะกลายเป็น NEW ทั้งที่ยังผูกกับ job อยู่)
         order.setUpdatedBy(username);
         order.setPlatformId(request.getPlatformId());
 
@@ -117,6 +128,24 @@ public class OrderService {
 
         order.setOrderStatus("COMPLETED");
         order.setDeliveryDate(LocalDateTime.now());
+        order.setUpdatedBy(username);
+
+        Order savedOrder = orderRepository.save(order);
+        return mapToResponse(savedOrder);
+    }
+
+    @Transactional
+    public OrderResponse cancelOrder(Long orderId, String username) {
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
+
+        if (!"NEW".equals(order.getOrderStatus())) {
+            throw new IllegalArgumentException(
+                    "Order " + orderId + " is already in progress (status: " + order.getOrderStatus()
+                            + ") and cannot be cancelled/deleted");
+        }
+
+        order.setOrderStatus("CANCELLED");
         order.setUpdatedBy(username);
 
         Order savedOrder = orderRepository.save(order);

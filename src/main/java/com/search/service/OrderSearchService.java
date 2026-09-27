@@ -1,5 +1,6 @@
 package com.search.service;
 
+import com.master.dto.AddressInfoRequest;
 import com.search.dto.master.AddressInfoDto;
 import com.search.dto.request.OrderSearchRequest;
 import com.search.dto.response.OrderResponse;
@@ -21,7 +22,6 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -104,22 +104,30 @@ public class OrderSearchService {
         Page<Order> orderPage = orderRepository.findAll(spec, pageable);
         List<Order> orders = orderPage.getContent();
 
-        // Collect unique subdistrictIds for batch fetch
-        Collection<String> subdistrictCodes = orders.stream()
+        // Collect unique province/district/subdistrict code combos for batch fetch.
+        // Resolved independently (not keyed on subdistrict alone) so addresses missing
+        // a subdistrict_code still get their province/district names filled in.
+        List<AddressInfoRequest> addressRequests = orders.stream()
                 .map(Order::getAddress)
                 .filter(Objects::nonNull)
-                .map(OrderAddress::getSubdistrictCode)
-                .filter(Objects::nonNull)
+                .filter(a -> a.getProvinceCode() != null || a.getDistrictCode() != null || a.getSubdistrictCode() != null)
+                .map(a -> AddressInfoRequest.builder()
+                        .provinceCode(a.getProvinceCode())
+                        .districtCode(a.getDistrictCode())
+                        .subdistrictCode(a.getSubdistrictCode())
+                        .build())
                 .distinct()
                 .toList();
 
         // Fetch all address info in one batch call
         Map<String, AddressInfoDto> addressInfoMap = Map.of();
-        if (!subdistrictCodes.isEmpty()) {
-            List<AddressInfoDto> addressInfoList = masterDataService.getAddressInfoBySubdistrictCodeBatch(subdistrictCodes);
+        if (!addressRequests.isEmpty()) {
+            List<AddressInfoDto> addressInfoList = masterDataService.getAddressInfoBatch(addressRequests);
             addressInfoMap = addressInfoList.stream()
-                    .filter(info -> info.getSubdistrictCode() != null)
-                    .collect(Collectors.toMap(AddressInfoDto::getSubdistrictCode, Function.identity()));
+                    .collect(Collectors.toMap(
+                            info -> addressKey(info.getProvinceCode(), info.getDistrictCode(), info.getSubdistrictCode()),
+                            Function.identity(),
+                            (first, second) -> first));
         }
 
         // Map orders to responses using the batch-fetched address info
@@ -158,7 +166,8 @@ public class OrderSearchService {
             return null;
         }
 
-        AddressInfoDto addressInfo = address.getSubdistrictCode() != null ? addressInfoMap.get(address.getSubdistrictCode()) : null;
+        AddressInfoDto addressInfo = addressInfoMap.get(
+                addressKey(address.getProvinceCode(), address.getDistrictCode(), address.getSubdistrictCode()));
 
         return OrderResponse.OrderAddressResponse.builder()
                 .addressId(address.getAddressId())
@@ -174,5 +183,9 @@ public class OrderSearchService {
                 .lng(address.getLng())
                 .mapLink(address.getMapLink())
                 .build();
+    }
+
+    private static String addressKey(String provinceCode, String districtCode, String subdistrictCode) {
+        return provinceCode + "|" + districtCode + "|" + subdistrictCode;
     }
 }

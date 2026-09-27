@@ -100,6 +100,29 @@ public class OrderController {
         return ResponseEntity.ok(response);
     }
 
+    @Operation(summary = "Cancel an order", description = "Marks an order as cancelled")
+    @ApiResponses(value = {
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "200",
+                    description = "Order cancelled successfully",
+                    content = @Content(schema = @Schema(implementation = ApiResponse.class))
+            ),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(
+                    responseCode = "404",
+                    description = "Order not found",
+                    content = @Content(schema = @Schema(implementation = ApiResponse.class))
+            )
+    })
+    @PatchMapping("/cancel/{orderId}")
+    public ResponseEntity<ApiResponse<OrderResponse>> cancelOrder(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
+            @PathVariable Long orderId) {
+        String username = securityService.extractUsernameFromToken(authHeader);
+        OrderResponse data = orderService.cancelOrder(orderId, username);
+        ApiResponse<OrderResponse> response = ApiResponse.success(data, "Order cancelled successfully");
+        return ResponseEntity.ok(response);
+    }
+
     @Operation(summary = "Delete an order", description = "Deletes an order by ID")
     @ApiResponses(value = {
             @io.swagger.v3.oas.annotations.responses.ApiResponse(

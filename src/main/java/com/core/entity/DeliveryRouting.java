@@ -37,7 +37,7 @@ public class DeliveryRouting {
 
     @Column(name = "routing_status", length = 20)
     @Builder.Default
-    private String routingStatus = "new";
+    private String routingStatus = "NEW";
 
     @Column(name = "notes", columnDefinition = "TEXT")
     private String notes;

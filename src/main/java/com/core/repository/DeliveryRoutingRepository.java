@@ -13,13 +13,11 @@ public interface DeliveryRoutingRepository extends JpaRepository<DeliveryRouting
 
     List<DeliveryRouting> findByDeliveryJobJobId(Long jobId);
 
+    List<DeliveryRouting> findByDeliveryJobJobIdIn(List<Long> jobIds);
+
     List<DeliveryRouting> findByDeliveryJobJobIdOrderBySequenceNoAsc(Long jobId);
 
     List<DeliveryRouting> findByOrderOrderId(Long orderId);
 
     Optional<DeliveryRouting> findByDeliveryJobJobIdAndOrderOrderId(Long jobId, Long orderId);
-
-    List<DeliveryRouting> findByRoutingStatus(String routingStatus);
-
-    boolean existsByDeliveryJobJobIdAndOrderOrderId(Long jobId, Long orderId);
 }

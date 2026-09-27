@@ -6,6 +6,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
@@ -34,6 +35,14 @@ public class Subdistrict {
 
     @Column(name = "zip_code", length = 10)
     private String zipCode;
+
+    // จุดศูนย์กลาง (centroid) ของตำบล เติมโดย db/scripts/district_distance_batch.py
+    // (sync-subdistricts) ใช้คำนวณระยะทาง Haversine — อาจเป็น NULL ถ้ายังไม่เคย sync
+    @Column(name = "lat", precision = 9, scale = 6)
+    private BigDecimal lat;
+
+    @Column(name = "lng", precision = 9, scale = 6)
+    private BigDecimal lng;
 
     @Column(name = "created_at")
     private LocalDateTime createdAt;

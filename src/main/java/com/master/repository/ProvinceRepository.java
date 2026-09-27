@@ -14,8 +14,5 @@ public interface ProvinceRepository extends JpaRepository<Province, Long>, JpaSp
 
     Optional<Province> findByCode(String code);
 
-    boolean existsByCode(String code);
-
     List<Province> findAllByCodeIn(Collection<String> codes);
-
 }

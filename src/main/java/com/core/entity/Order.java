@@ -67,7 +67,7 @@ public class Order {
 
     @Column(name = "order_status", length = 20)
     @Builder.Default
-    private String orderStatus = "new";
+    private String orderStatus = "NEW";
 
     @Column(name = "delivery_date")
     private LocalDateTime deliveryDate;

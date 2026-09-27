@@ -9,7 +9,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import java.nio.charset.StandardCharsets;
-import java.time.Instant;
 import java.util.Base64;
 
 @Slf4j
@@ -25,37 +24,6 @@ public class SecurityService {
     public SecurityService(AuthenticationService authenticationService) {
         this.authenticationService = authenticationService;
         this.objectMapper = new ObjectMapper();
-    }
-
-    public String validateToken(String authHeader, String requestUri) {
-        // Check if Authorization header exists
-        if (authHeader == null || authHeader.isEmpty()) {
-            log.warn("Missing Authorization header for request: {}", requestUri);
-            return "Missing Authorization header";
-        }
-
-        // Check if token has correct prefix
-        if (!authHeader.startsWith(tokenPrefix)) {
-            log.warn("Invalid token format for request: {}", requestUri);
-            return "Invalid token format. Expected: " + tokenPrefix.trim() + " <token>";
-        }
-
-        // Extract token
-        String token = authHeader.substring(tokenPrefix.length());
-
-        if (token.isEmpty()) {
-            log.warn("Empty token for request: {}", requestUri);
-            return "Token is empty";
-        }
-
-        // Check token expiration
-        String expirationError = checkTokenExpiration(token);
-        if (expirationError != null) {
-            return expirationError;
-        }
-
-        log.debug("Token validation passed for request: {}", requestUri);
-        return null;
     }
 
     public String checkPermission(String authHeader, String method, String api) {
@@ -129,19 +97,6 @@ public class SecurityService {
         }
     }
 
-    public Integer extractUserIdFromToken(String authHeader) {
-        try {
-            JsonNode payload = parseTokenPayload(authHeader);
-            if (payload != null && payload.has("userId")) {
-                return payload.get("userId").asInt();
-            }
-            return null;
-        } catch (Exception e) {
-            log.error("Error extracting userId from token: {}", e.getMessage());
-            return null;
-        }
-    }
-
     public String extractRoleFromToken(String authHeader) {
         try {
             JsonNode payload = parseTokenPayload(authHeader);
@@ -168,48 +123,6 @@ public class SecurityService {
         } catch (Exception e) {
             log.error("Error parsing token payload: {}", e.getMessage());
             return null;
-        }
-    }
-
-    private String checkTokenExpiration(String token) {
-        try {
-            // Simple JWT structure check (header.payload.signature)
-            String[] parts = token.split("\\.");
-            if (parts.length != 3) {
-                log.warn("Invalid token structure");
-                return "Invalid token structure";
-            }
-
-            // Decode payload (second part)
-            String payload = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
-
-            // Simple expiration check - looking for "exp" claim
-            if (payload.contains("\"exp\"")) {
-                // Extract exp value (simplified parsing)
-                int expIndex = payload.indexOf("\"exp\"");
-                int colonIndex = payload.indexOf(":", expIndex);
-                int endIndex = payload.indexOf(",", colonIndex);
-                if (endIndex == -1) {
-                    endIndex = payload.indexOf("}", colonIndex);
-                }
-
-                String expValue = payload.substring(colonIndex + 1, endIndex).trim();
-                long expTimestamp = Long.parseLong(expValue);
-                long currentTimestamp = Instant.now().getEpochSecond();
-
-                if (currentTimestamp > expTimestamp) {
-                    log.warn("Token has expired. Exp: {}, Current: {}", expTimestamp, currentTimestamp);
-                    return "Token has expired";
-                }
-            }
-
-            return null;
-        } catch (IllegalArgumentException e) {
-            log.warn("Failed to decode/parse token: {}", e.getMessage());
-            return "Invalid token encoding or format";
-        } catch (Exception e) {
-            log.warn("Token validation error: {}", e.getMessage());
-            return "Token validation failed";
         }
     }
 }

@@ -35,7 +35,7 @@ public class DeliveryJob {
 
     @Column(name = "delivery_status")
     @Builder.Default
-    private String deliveryStatus = "new";
+    private String deliveryStatus = "NEW";
 
     @Column(name = "status")
     @Builder.Default

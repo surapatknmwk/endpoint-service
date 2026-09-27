@@ -46,7 +46,7 @@ public class EndpointServicesApplication {
     public static void main(String[] args) {
         Environment env = SpringApplication.run(EndpointServicesApplication.class, args).getEnvironment();
 
-        String port = env.getProperty("server.port", "8080");
+        String port = env.getProperty("server.port", "8081");
         String contextPath = env.getProperty("server.servlet.context-path", "/");
         String profiles = String.join(", ", env.getActiveProfiles().length > 0 ? env.getActiveProfiles() : new String[]{"default"});
         String dbUrl = env.getProperty("spring.datasource.url", "N/A");

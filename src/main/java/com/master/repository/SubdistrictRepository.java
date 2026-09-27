@@ -14,12 +14,7 @@ public interface SubdistrictRepository extends JpaRepository<Subdistrict, Long>,
 
     Optional<Subdistrict> findByCode(String code);
 
-    boolean existsByCode(String code);
-
     List<Subdistrict> findByDistrictDistrictId(Long districtId);
 
-    List<Subdistrict> findByZipCode(String zipCode);
-
     List<Subdistrict> findAllByCodeIn(Collection<String> codes);
-
 }

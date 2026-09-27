@@ -13,12 +13,7 @@ public interface ConfigurationRepository extends JpaRepository<Configuration, Lo
 
     Optional<Configuration> findByCode(String code);
 
-    boolean existsByCode(String code);
-
     List<Configuration> findByGroupCode(String groupCode);
 
-    List<Configuration> findByStatus(String status);
-
     List<Configuration> findByGroupCodeAndStatus(String groupCode, String status);
-
 }

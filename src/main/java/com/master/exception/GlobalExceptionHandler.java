@@ -49,6 +49,20 @@ public class GlobalExceptionHandler {
                 .body(ApiResponse.error(ex.getMessage()));
     }
 
+    @ExceptionHandler(ExternalApiException.class)
+    public ResponseEntity<ApiResponse<Object>> handleExternalApiException(ExternalApiException ex) {
+        log.error("External API error: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                .body(ApiResponse.error(ex.getMessage()));
+    }
+
+    @ExceptionHandler(GoogleRoutesQuotaExceededException.class)
+    public ResponseEntity<ApiResponse<Object>> handleGoogleRoutesQuotaExceededException(GoogleRoutesQuotaExceededException ex) {
+        log.warn("Google Routes daily quota exceeded: {}", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .body(ApiResponse.error(ex.getMessage()));
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<ApiResponse<Object>> handleIllegalArgumentException(IllegalArgumentException ex) {
         log.error("Illegal argument: {}", ex.getMessage());
