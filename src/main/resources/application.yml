@@ -51,6 +51,13 @@ jwt:
   secret: YourSuperSecretKeyThatIsAtLeast256BitsLongForHS256Algorithm
   expiration: 3600000
 
+# ---- Password encryption (authentication module) ----
+# AES-256 key, Base64 of 32 random bytes (openssl rand -base64 32). Local-only value;
+# prod reads PASSWORD_ENCRYPTION_KEY. Changing it makes stored passwords undecryptable.
+password:
+  encryption:
+    key: bG9jYWwtZGV2LW9ubHkta2V5LTMyLWJ5dGVzLWxvbmc=
+
 # ---- Security filter (shared across core + master + search modules) ----
 security:
   filter:
@@ -58,6 +65,29 @@ security:
     token:
       header: Authorization
       prefix: Bearer
+  # Comma-separated origins allowed to call the API cross-origin (read by CorsAllowlistFilter).
+  # Empty = none: the webapp reaches the API same-origin through the Vite proxy / Caddy.
+  cors:
+    allowed-origins:
+  # Repeated-call protection (read by RequestThrottleFilter, answers 429). Not repeated in
+  # application-prod.yml: prod inherits these values; override with SECURITY_THROTTLE_* env vars.
+  throttle:
+    enabled: true
+    # Flood guard: max calls per client IP, all endpoints together, per window.
+    window-seconds: 10
+    max-requests: 200
+    # Double-submit guard: the same write (same token + method + URL) is accepted once per window.
+    duplicate-window-seconds: 3
+    # POST endpoints that only read/calculate, so calling them again right away is normal.
+    duplicate-exempt-posts: >-
+      /endpoint-search-service/**,
+      /endpoint-master-service/api/address/**,
+      /endpoint-master-service/api/provinces/search,
+      /endpoint-core-service/api/jobs/route-preview
+  # Risky activity is aggregated in memory and written to table security_events this often
+  # (SecurityEventRecorder): one row per distinct event per interval, never one per request.
+  events:
+    flush-seconds: 30
 
 # ---- API filter token prefix ----
 # Still consumed independently by com.core.service.security.SecurityService;
