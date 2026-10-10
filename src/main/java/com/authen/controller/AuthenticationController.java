@@ -107,7 +107,6 @@ public class AuthenticationController {
             @Parameter(description = "JWT token in format: Bearer {token}", required = true)
             @RequestHeader("Authorization") String authHeader) {
         try {
-            log.info("[/validate] Authorization : {}",authHeader);
             String token = authHeader.replace("Bearer ", "");
             boolean isValid = authenticationService.validateToken(token);
             if (isValid) {
@@ -142,7 +141,7 @@ public class AuthenticationController {
             @RequestHeader("Authorization") String authHeader,
             @Valid @RequestBody CheckPermissionRequest request) {
         try {
-            log.info("[/check-permission] Authorization : {} request : {}",authHeader,request);
+            log.info("[/check-permission] request : {}", request);
             String token = authHeader.replace("Bearer ", "");
             boolean hasPermission = authenticationService.checkPermission(
                     token,

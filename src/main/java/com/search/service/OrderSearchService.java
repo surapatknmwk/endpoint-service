@@ -186,6 +186,10 @@ public class OrderSearchService {
     }
 
     private static String addressKey(String provinceCode, String districtCode, String subdistrictCode) {
-        return provinceCode + "|" + districtCode + "|" + subdistrictCode;
+        // null กับ "" ถือเป็นค่าเดียวกัน — กัน key ไม่ match ถ้าฝั่ง master normalize ค่าว่างต่างจากเรา
+        return String.join("|",
+                Objects.toString(provinceCode, ""),
+                Objects.toString(districtCode, ""),
+                Objects.toString(subdistrictCode, ""));
     }
 }

@@ -8,6 +8,7 @@ import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.context.annotation.FullyQualifiedAnnotationBeanNameGenerator;
 import org.springframework.core.env.Environment;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * Consolidated entry point that merges the formerly separate microservices
@@ -25,6 +26,7 @@ import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
  */
 @Slf4j
 @EnableCaching
+@EnableScheduling
 @SpringBootApplication(
         scanBasePackages = {"com.common", "com.authen", "com.core", "com.master", "com.search"},
         nameGenerator = FullyQualifiedAnnotationBeanNameGenerator.class

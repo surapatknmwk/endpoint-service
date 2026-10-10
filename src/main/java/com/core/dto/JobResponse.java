@@ -55,5 +55,11 @@ public class JobResponse {
         private OrderResponse.OrderAddressResponse address;
         private Integer sequenceNo;
         private String routingStatus;
+        // สถานะ order ปัจจุบัน — ใช้บอกว่าจุดที่ข้ามในงานที่ปิดแล้ว กลับไปรอจัดส่ง หรือส่งไม่สำเร็จ
+        private String orderStatus;
+        // ข้อมูลสำหรับการ์ดจุดถัดไป — ปุ่ม "โทร", รายละเอียดสินค้า, เวลาส่ง ("ส่งแล้ว 09:10")
+        private String tel;
+        private String detail;
+        private LocalDateTime deliveredAt;
     }
 }

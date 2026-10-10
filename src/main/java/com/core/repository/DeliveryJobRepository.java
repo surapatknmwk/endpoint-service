@@ -10,5 +10,5 @@ import java.util.List;
 @Repository
 public interface DeliveryJobRepository extends JpaRepository<DeliveryJob, Long>, JpaSpecificationExecutor<DeliveryJob> {
 
-    List<DeliveryJob> findByStatusOrderByCreatedAtDesc(String status);
+    List<DeliveryJob> findByStatusAndCreatedByOrderByCreatedAtDesc(String status, String createdBy);
 }

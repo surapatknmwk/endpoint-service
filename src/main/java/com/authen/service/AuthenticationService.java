@@ -9,6 +9,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.authen.constant.SecurityEventType;
 import com.authen.dto.LoginRequest;
 import com.authen.dto.LoginResponse;
 import com.authen.entity.User;
@@ -30,6 +31,7 @@ public class AuthenticationService {
     private final PermissionRepository permissionRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
+    private final SecurityEventRecorder securityEventRecorder;
 
     @Value("${jwt.expiration}")
     private Long jwtExpiration;
@@ -37,17 +39,27 @@ public class AuthenticationService {
     @Transactional
     public LoginResponse login(LoginRequest request, HttpServletRequest httpRequest) {
 
-        log.info("login : {}",request);
+        log.info("login : username={}", request.getUsername());
 
-        User user = userRepository.findByUsername(request.getUsername())
-                .orElseThrow(() -> new RuntimeException("Invalid username or password"));
+        User user = userRepository.findByUsername(request.getUsername()).orElse(null);
+        if (user == null) {
+            recordLoginFailed(request, httpRequest, "Unknown username");
+            throw new RuntimeException("Invalid username or password");
+        }
 
         if (!user.getIsActive()) {
+            recordLoginFailed(request, httpRequest, "Account is disabled");
             throw new RuntimeException("User account is disabled");
         }
 
-        if (!user.getPasswordHash().equals(request.getPassword())) {
+        if (!passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
+            recordLoginFailed(request, httpRequest, "Wrong password");
             throw new RuntimeException("Invalid username or password");
+        }
+
+        // legacy plain-text row: encrypt it now, saved together with last_login below
+        if (passwordEncoder.upgradeEncoding(user.getPasswordHash())) {
+            user.setPasswordHash(passwordEncoder.encode(request.getPassword()));
         }
 
         String token = jwtUtil.generateToken(
@@ -102,7 +114,7 @@ public class AuthenticationService {
     }
 
     public boolean checkPermission(String token, String method, String api) {
-         log.info("checkPermission : token={} ,method={} ,api={}",token,method,api);
+        log.info("checkPermission : method={} ,api={}", method, api);
 
         if (!validateToken(token)) {
             throw new RuntimeException("Invalid or expired token");
@@ -142,6 +154,10 @@ public class AuthenticationService {
         return LoginResponse.builder()
                 .token(newToken)
                 .build();
+    }
+
+    private void recordLoginFailed(LoginRequest request, HttpServletRequest httpRequest, String reason) {
+        securityEventRecorder.record(SecurityEventType.LOGIN_FAILED, httpRequest, request.getUsername(), reason);
     }
 
     private String getClientIp(HttpServletRequest request) {

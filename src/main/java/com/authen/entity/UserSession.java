@@ -27,6 +27,7 @@ public class UserSession {
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
 
+    @ToString.Exclude
     @Column(name = "token", length = 1000, nullable = false, unique = true)
     private String token;
 

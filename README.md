@@ -18,7 +18,7 @@ endpoint-services (single Spring Boot app, port 8081)
 ├── com.core     → Core module (orders + delivery jobs)
 ├── com.master   → Master Data module
 ├── com.search   → Order Search module
-└── com.common   → Shared cross-module code (ApiResponse, SecurityFilter, exceptions)
+└── com.common   → Shared cross-module code (ApiResponse, security filters, exceptions)
 ```
 
 Each module has its own API path prefix:
@@ -46,17 +46,25 @@ src/main/java/com/
 │   ├── exception/    InvalidTokenException, TokenExpiredException, InvalidRequestBodyException
 │   ├── config/        CacheConfig (shared CacheManager: permissionCache), ClockConfig
 │   ├── util/          GeoDistance (haversine straight-line km)
-│   └── filter/        SecurityFilter (single filter covering all 3 path-prefixed
-│                       modules; branches internally for core's permission check
-│                       and search's JWT "sub" extraction)
+│   └── filter/        run in this order on every request:
+│                       CorsAllowlistFilter   (CORS allow-list, all 4 modules)
+│                       RequestThrottleFilter (429 for floods / repeated writes)
+│                       SecurityFilter        (token + role permission check on
+│                                              core / master / search; search's JWT
+│                                              "sub" extraction)
 │
 ├── authen/                                ← Authentication module
 │   ├── controller/   AuthenticationController, HealthController
-│   ├── service/      AuthenticationService
-│   ├── entity/       User, Role, Permission, Provider, UserSession
-│   ├── repository/   UserRepository, PermissionRepository, UserSessionRepository
+│   ├── service/      AuthenticationService, SecurityEventRecorder (risky activity →
+│   │                  table security_events), PasswordEncryptionMigration (encrypts
+│   │                  plain-text passwords at startup)
+│   ├── entity/       User, Role, Permission, Provider, UserSession, SecurityEvent
+│   ├── repository/   UserRepository, PermissionRepository, UserSessionRepository,
+│   │                  SecurityEventRepository
+│   ├── constant/     SecurityEventType
 │   ├── config/       SecurityConfig (Spring Security), OpenApiConfig
-│   ├── util/         JwtUtil
+│   ├── util/         JwtUtil, AesPasswordEncoder (reversible AES-256-GCM encryption of
+│   │                  users.password_hash)
 │   ├── dto/          LoginRequest, LoginResponse, ...
 │   └── exception/    GlobalExceptionHandler
 │
@@ -101,6 +109,14 @@ src/main/java/com/
 - `application-prod.yml` — production profile (same structure, values from environment variables)
 
 ## API surface
+
+Cross-cutting rules (details in `docs/user-stories/orders.md` → Actor):
+
+- core / master / search need a valid token **and** a `permissions` row for the token's
+  role (prod profile); a failure is `401`.
+- Orders and jobs are **per user**: lists return only the caller's own rows, and a call on
+  someone else's order/job id answers `400` "… not found", same as a missing id.
+- Any endpoint can answer `429` (flood from one IP, or the same write repeated within 3 s).
 
 | Module | Method & Path | Purpose |
 |---|---|---|
@@ -147,11 +163,32 @@ OpenAPI spec: `http://localhost:8081/v3/api-docs`
 - **One shared `SecurityFilter`** (`com.common.filter.SecurityFilter`) — a single
   `OncePerRequestFilter` bean covers all three path-prefixed modules
   (`/endpoint-core-service/**`, `/endpoint-master-service/**`,
-  `/endpoint-search-service/**`); `shouldNotFilter()` skips everything else. Each
-  module's distinguishing behavior (core's permission check via `SecurityService`,
-  search's JWT `sub`-claim extraction) is handled via path-prefix branching inside the
-  filter. The authentication module's Spring Security chain is scoped separately via
+  `/endpoint-search-service/**`); `shouldNotFilter()` skips everything else. Every
+  module gets the token check and the role permission check via `SecurityService`
+  (rows in `providers` / `permissions`, seeded by `db/permissions-*-data.sql`); search's
+  JWT `sub`-claim extraction is handled via path-prefix branching inside the filter. The
+  authentication module's Spring Security chain is scoped separately via
   `.securityMatcher("/endpoint-authen-service/**")`.
+- **Repeated-call protection** (`com.common.filter.RequestThrottleFilter`) — runs right
+  after the CORS filter and before any token/DB work, answering `429`: a per-IP flood
+  guard on all four modules (`security.throttle.max-requests` per `window-seconds`) and a
+  double-submit guard on core / master / search writes (same token + method + URL once
+  per `duplicate-window-seconds`; read-style POSTs listed in `duplicate-exempt-posts`).
+  State is in-memory (Caffeine), i.e. per JVM. **A new POST endpoint that only reads must
+  be added to `duplicate-exempt-posts`** or rapid repeats of it will get `429`.
+- **Security event log** (`com.authen.service.SecurityEventRecorder` → table
+  `security_events`) — risky activity only, not a request log. `record(...)` just updates
+  an in-memory aggregate (no DB on the request thread); a scheduled `flush()` every
+  `security.events.flush-seconds` writes one row per distinct event with its
+  `occurrence_count`. Recorded today: `RATE_LIMIT_EXCEEDED`, `DUPLICATE_REQUEST` (from the
+  3rd repeat), `LOGIN_FAILED`, `PERMISSION_DENIED`. To record something new, add a constant
+  to `com.authen.constant.SecurityEventType` and call `record(...)` — `event_type` is free
+  text in the table, so no schema change. If the table is missing the service keeps
+  running and logs an error on each flush.
+- **One CORS decision point** (`com.common.filter.CorsAllowlistFilter`) — runs first, for
+  all four modules. CORS headers go only to origins in `security.cors.allowed-origins`
+  (empty by default: the webapp reaches the API same-origin through Vite's proxy / Caddy);
+  preflights from other origins get `403`.
 - **One shared `ApiResponse` / exception set** (`com.common.dto`, `com.common.exception`)
   — the standard response wrapper and `InvalidTokenException`/`TokenExpiredException`/
   `InvalidRequestBodyException` are defined once and reused by all modules.
@@ -174,14 +211,15 @@ OpenAPI spec: `http://localhost:8081/v3/api-docs`
 All config is merged into two YAML files:
 
 - **`application.yml`** (default/local) — single Postgres datasource (`endpoint_db`),
-  JWT secret/expiration, `security.filter.*` properties (read by the shared
+  JWT secret/expiration, `password.encryption.key` (AES key for `users.password_hash`),
+  `security.filter.*` properties (read by the shared
   `com.common.filter.SecurityFilter`), inter-module service URLs, search tuning,
   actuator, and Swagger settings. `api.filter.token.prefix` is kept as a separate key
   — it's read independently by `com.core.service.security.SecurityService`, unrelated
   to the main security filter.
 - **`application-prod.yml`** — same structure, values sourced from environment
   variables (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`,
-  `JWT_SECRET`, `SERVER_PORT`, `SERVICE_*_URL`, ...).
+  `JWT_SECRET`, `PASSWORD_ENCRYPTION_KEY`, `CORS_ALLOWED_ORIGINS`, `SERVER_PORT`, `SERVICE_*_URL`, ...).
 
 `spring.jpa.hibernate.ddl-auto` is `none` because two modules (`core`, `search`) map
 different entity definitions onto the same physical tables — schema is managed by the

@@ -1,6 +1,8 @@
 package com.common.filter;
 
+import com.authen.constant.SecurityEventType;
 import com.authen.service.AuthenticationService;
+import com.authen.service.SecurityEventRecorder;
 import com.common.dto.ApiResponse;
 import com.common.exception.InvalidTokenException;
 import com.common.exception.TokenExpiredException;
@@ -28,8 +30,9 @@ import java.util.Map;
 /**
  * Single security filter covering all three consolidated path prefixes
  * (core / master / search), replacing the 3 near-identical per-module copies.
- * Each module's distinguishing behaviour (core's permission check, search's
- * "sub" claim extraction) is preserved via path-prefix branching below.
+ * Every module gets the token check and the role permission check; search's
+ * "sub" claim extraction is preserved via path-prefix branching below.
+ * CORS is handled earlier by {@link CorsAllowlistFilter}.
  */
 @Slf4j
 @Component
@@ -52,6 +55,7 @@ public class SecurityFilter extends OncePerRequestFilter {
     private final AuthenticationService authenticationService;
     private final SecurityService securityService;
     private final RequestMappingHandlerMapping requestMappingHandlerMapping;
+    private final SecurityEventRecorder securityEventRecorder;
 
     @Value("${security.filter.enabled:false}")
     private boolean filterEnabled;
@@ -69,17 +73,6 @@ public class SecurityFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
 
         String path = request.getRequestURI();
-
-        response.setHeader("Access-Control-Allow-Origin", request.getHeader("Origin"));
-        response.setHeader("Access-Control-Allow-Methods", corsAllowedMethods(path));
-        response.setHeader("Access-Control-Allow-Headers", "*");
-        response.setHeader("Access-Control-Expose-Headers", "Authorization");
-        response.setHeader("Access-Control-Allow-Credentials", "true");
-
-        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
-            response.setStatus(HttpServletResponse.SC_OK);
-            return;
-        }
 
         log.info("=============== [{}] {}", request.getMethod(), path);
 
@@ -104,10 +97,6 @@ public class SecurityFilter extends OncePerRequestFilter {
         return !(path.startsWith(CORE_PREFIX) || path.startsWith(MASTER_PREFIX) || path.startsWith(SEARCH_PREFIX));
     }
 
-    private String corsAllowedMethods(String path) {
-        return path.startsWith(CORE_PREFIX) ? "GET, POST, DELETE, PUT, PATCH, OPTIONS" : "GET, POST";
-    }
-
     private boolean isExcludedPath(String path) {
         return EXCLUDED_PATHS.stream().anyMatch(path::contains);
     }
@@ -127,15 +116,17 @@ public class SecurityFilter extends OncePerRequestFilter {
 
         validateTokenLocally(token);
 
-        if (path.startsWith(CORE_PREFIX)) {
-            // Controller mappings already carry the "/endpoint-core-service" prefix in the
-            // consolidated application, so the matched pattern is used as-is.
-            String apiPattern = getApiPattern(request);
-            var checkPermission = securityService.checkPermission(authHeader, request.getMethod(), apiPattern);
-            if (checkPermission != null) {
-                throw new InvalidTokenException(checkPermission);
-            }
-        } else if (path.startsWith(SEARCH_PREFIX)) {
+        // Controller mappings already carry the module prefix ("/endpoint-core-service", ...)
+        // in the consolidated application, so the matched pattern is used as-is.
+        String apiPattern = getApiPattern(request);
+        var checkPermission = securityService.checkPermission(authHeader, request.getMethod(), apiPattern);
+        if (checkPermission != null) {
+            securityEventRecorder.record(SecurityEventType.PERMISSION_DENIED, request,
+                    securityService.extractUsernameFromToken(authHeader), checkPermission);
+            throw new InvalidTokenException(checkPermission);
+        }
+
+        if (path.startsWith(SEARCH_PREFIX)) {
             String sub = extractSubFromJwt(token);
             if (sub != null) {
                 request.setAttribute("currentUserId", sub);

@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import lombok.ToString;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
@@ -25,6 +26,7 @@ public class User {
     @Column(name = "username", length = 50, nullable = false, unique = true)
     private String username;
 
+    @ToString.Exclude
     @Column(name = "password_hash", length = 255, nullable = false)
     private String passwordHash;
 

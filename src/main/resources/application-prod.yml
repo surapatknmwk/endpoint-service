@@ -51,12 +51,18 @@ jwt:
   secret: ${JWT_SECRET}
   expiration: ${JWT_EXPIRATION:3600000}
 
+password:
+  encryption:
+    key: ${PASSWORD_ENCRYPTION_KEY}
+
 security:
   filter:
     enabled: true
     token:
       header: Authorization
       prefix: Bearer
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:}
 
 # Still consumed independently by com.core.service.security.SecurityService;
 # token.prefix intentionally omitted so the default "Bearer " (with trailing

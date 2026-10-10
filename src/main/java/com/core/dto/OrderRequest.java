@@ -1,6 +1,7 @@
 package com.core.dto;
 
 import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.NotNull;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -16,6 +17,7 @@ import java.time.LocalDateTime;
 public class OrderRequest {
 
     @Schema(description = "Customer information")
+    @NotNull
     private CustomerInfo customer;
 
     @Schema(description = "Platform Id", example = "FB")
@@ -49,6 +51,7 @@ public class OrderRequest {
     }
 
     @Schema(description = "Delivery address information")
+    @NotNull
     private AddressInfo address;
 
     @Data
@@ -102,7 +105,8 @@ public class OrderRequest {
     @Schema(description = "Additional remarks", example = "Leave at door")
     private String remark;
 
-    @Schema(description = "Order status", example = "PENDING")
+    @Schema(description = "Ignored — status is set by the server (NEW on create, unchanged on update)",
+            example = "NEW", deprecated = true)
     private String orderStatus;
 
     @Schema(description = "Expected delivery date", example = "2024-12-31")

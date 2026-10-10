@@ -1,5 +1,6 @@
 package com.core.service;
 
+import com.core.constant.OrderStatus;
 import com.core.dto.OrderRequest;
 import com.core.dto.OrderResponse;
 import com.core.entity.Customer;
@@ -20,12 +21,18 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class OrderService {
+
+    private static final Set<String> COMPLETABLE_STATUSES = Set.of(OrderStatus.NEW, OrderStatus.PENDING);
+    // order ที่ไม่ได้อยู่ในงานที่ยังเปิด — ยกเลิกได้
+    private static final Set<String> CANCELLABLE_STATUSES = Set.of(OrderStatus.NEW, OrderStatus.PENDING);
 
     private final OrderRepository orderRepository;
     private final CustomerRepository customerRepository;
@@ -54,7 +61,8 @@ public class OrderService {
                 .sequenceNo(request.getSequenceNo() != null ? request.getSequenceNo() : 1)
                 .detail(request.getDetail())
                 .remark(request.getRemark())
-                .orderStatus(request.getOrderStatus() != null ? request.getOrderStatus() : "NEW")
+                // orderStatus ไม่รับจาก request — order ใหม่เริ่มที่ NEW เสมอ
+                .orderStatus(OrderStatus.NEW)
                 .createdBy(username)
                 .build();
 
@@ -66,16 +74,17 @@ public class OrderService {
     public OrderResponse updateOrder(Long orderId, OrderRequest request, String username) {
         log.info("Update Order : {}",request);
 
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
+        Order order = findOwnedOrder(orderId, username);
 
         String currentStatus = order.getOrderStatus();
-        if ("COMPLETED".equals(currentStatus) || "CANCELLED".equals(currentStatus)) {
+        if (OrderStatus.COMPLETED.equals(currentStatus) || OrderStatus.CANCELLED.equals(currentStatus)
+                || OrderStatus.FAILED.equals(currentStatus)) {
             throw new IllegalArgumentException(
                     "Order " + orderId + " has status " + currentStatus + " and cannot be edited");
         }
-        // PENDING/IN_TRANSIT อยู่ระหว่างจัดส่งแล้ว ห้ามแก้ที่อยู่เพราะกระทบการคำนวณระยะทางของ job
-        boolean locationLocked = "PENDING".equals(currentStatus) || "IN_TRANSIT".equals(currentStatus);
+        // ASSIGNED / IN_TRANSIT อยู่ในงานที่ยังเปิด ห้ามแก้ที่อยู่เพราะกระทบการคำนวณระยะทางของ job
+        // PENDING แก้ได้ — งานที่ข้ามไว้ปิดไปแล้ว และต้องแก้ที่อยู่ผิดก่อนจัดเข้างานรอบถัดไป
+        boolean locationLocked = OrderStatus.IN_TRANSIT.equals(currentStatus) || OrderStatus.ASSIGNED.equals(currentStatus);
 
         // Update customer
         Customer customer = order.getCustomer();
@@ -97,6 +106,10 @@ public class OrderService {
             address.setDistrictCode(request.getAddress().getDistrictCode());
             address.setProvinceCode(request.getAddress().getProvinceCode());
             address.setZipCode(request.getAddress().getZipCode());
+        } else if (!Objects.equals(address.getSubdistrictCode(), request.getAddress().getSubdistrictCode())) {
+            // ไม่ throw เพราะ webapp ส่งรหัสที่อยู่เดิมกลับมาทุกครั้ง (อาจต่างรูปแบบเล็กน้อย) — แค่ไม่บันทึก
+            log.warn("Order {} is {}: ignoring location change {} -> {}", orderId, currentStatus,
+                    address.getSubdistrictCode(), request.getAddress().getSubdistrictCode());
         }
         address.setMapLink(request.getAddress().getMapLink());
         address.setUpdatedBy(username);
@@ -123,10 +136,15 @@ public class OrderService {
 
     @Transactional
     public OrderResponse completeOrder(Long orderId, String username) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
+        Order order = findOwnedOrder(orderId, username);
 
-        order.setOrderStatus("COMPLETED");
+        // IN_TRANSIT ต้องปิดผ่าน stop ของ job (JobService.completeStop) ไม่งั้น stop ค้างเปิด
+        if (!COMPLETABLE_STATUSES.contains(order.getOrderStatus())) {
+            throw new IllegalArgumentException(
+                    "Order " + orderId + " has status " + order.getOrderStatus() + " and cannot be completed");
+        }
+
+        order.setOrderStatus(OrderStatus.COMPLETED);
         order.setDeliveryDate(LocalDateTime.now());
         order.setUpdatedBy(username);
 
@@ -136,16 +154,15 @@ public class OrderService {
 
     @Transactional
     public OrderResponse cancelOrder(Long orderId, String username) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
+        Order order = findOwnedOrder(orderId, username);
 
-        if (!"NEW".equals(order.getOrderStatus())) {
+        if (!CANCELLABLE_STATUSES.contains(order.getOrderStatus())) {
             throw new IllegalArgumentException(
                     "Order " + orderId + " is already in progress (status: " + order.getOrderStatus()
-                            + ") and cannot be cancelled/deleted");
+                            + ") and cannot be cancelled");
         }
 
-        order.setOrderStatus("CANCELLED");
+        order.setOrderStatus(OrderStatus.CANCELLED);
         order.setUpdatedBy(username);
 
         Order savedOrder = orderRepository.save(order);
@@ -153,9 +170,14 @@ public class OrderService {
     }
 
     @Transactional
-    public void deleteOrder(Long orderId) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
+    public void deleteOrder(Long orderId, String username) {
+        Order order = findOwnedOrder(orderId, username);
+
+        // ห้ามลบ order ที่อยู่ใน job ที่กำลังส่ง — จะลบ stop ออกจาก job โดย totalOrders ไม่ถูกปรับ
+        if (OrderStatus.IN_TRANSIT.equals(order.getOrderStatus()) || OrderStatus.ASSIGNED.equals(order.getOrderStatus())) {
+            throw new IllegalArgumentException(
+                    "Order " + orderId + " is on an active job and cannot be deleted");
+        }
 
         // ลบ DeliveryRouting ที่เชื่อมกับ Order นี้ก่อน (FK constraint)
         deliveryRoutingRepository.deleteAll(
@@ -170,6 +192,16 @@ public class OrderService {
         // ลบ Customer และ Address ที่สร้างมาพร้อมกับ Order นี้
         if (customer != null) customerRepository.delete(customer);
         if (address != null) orderAddressRepository.delete(address);
+    }
+
+    /**
+     * Orders belong to the user who created them. Someone else's order is reported exactly like
+     * a missing one, so ids cannot be probed.
+     */
+    private Order findOwnedOrder(Long orderId, String username) {
+        return orderRepository.findById(orderId)
+                .filter(order -> username != null && username.equals(order.getCreatedBy()))
+                .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
     }
 
     private Customer createCustomer(OrderRequest.CustomerInfo customerInfo, String username) {

@@ -1,5 +1,7 @@
 package com.core.service;
 
+import com.core.constant.JobStatus;
+import com.core.constant.OrderStatus;
 import com.core.dto.CandidateOrderResponse;
 import com.core.dto.JobRequest;
 import com.core.dto.JobResponse;
@@ -25,11 +27,14 @@ import com.master.exception.GoogleRoutesQuotaExceededException;
 import com.master.service.GoogleRoutesService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -54,9 +59,15 @@ public class JobService {
     private static final int MAX_ORDERS_PER_JOB = 200;
     private static final int MAX_CANDIDATE_ORDERS = 500;
     private static final int MAX_CANDIDATE_RESULTS = 10;
-    private static final Set<String> PENDING_STATUSES = Set.of("NEW", "PENDING");
+    private static final Set<String> PENDING_STATUSES = Set.of(OrderStatus.NEW, OrderStatus.PENDING);
     // routing status ที่ถือว่าจุดนั้น "ปิดแล้ว" สำหรับการตัดสินว่างานจบหรือยัง
-    private static final Set<String> CLOSED_STOP_STATUSES = Set.of("COMPLETED", "SKIPPED");
+    private static final Set<String> CLOSED_STOP_STATUSES = Set.of("COMPLETED", "SKIPPED", "CANCELLED");
+    // order ที่ถูกข้ามครบจำนวนนี้ (นับจากงานที่ปิดแล้ว) เป็น FAILED ตอนงานปิด แทนที่จะกลับไป PENDING
+    static final int MAX_SKIPS_BEFORE_FAILED = 2;
+    // ยกเลิก "ส่งแล้ว" ได้ภายในเวลานี้หลังกดยืนยัน (หน้าจอแสดงปุ่ม "เลิกทำ" 8 วินาที — เผื่อ network)
+    static final Duration UNDO_COMPLETE_WINDOW = Duration.ofSeconds(60);
+    // routing status ที่ order ของจุดนั้นจบไปแล้ว (ส่งแล้ว / ยกเลิก) — เอาจุดออกหรือลบงานต้องไม่คืนสถานะ order
+    private static final Set<String> FINAL_STOP_STATUSES = Set.of("COMPLETED", "CANCELLED");
 
     private final DeliveryJobRepository deliveryJobRepository;
     private final DeliveryRoutingRepository deliveryRoutingRepository;
@@ -65,6 +76,7 @@ public class JobService {
     private final SubdistrictDistanceRepository subdistrictDistanceRepository;
     private final MasterDataService masterDataService;
     private final GoogleRoutesService googleRoutesService;
+    private final Clock clock;
 
     @Transactional
     public JobResponse createJob(JobRequest request, String username) {
@@ -79,7 +91,7 @@ public class JobService {
         Subdistrict origin = resolveSubdistrict(request.getOriginSubdistrictCode(), "Origin");
 
         List<Order> orders = orderRepository.findAllById(orderIds);
-        if (orders.size() != orderIds.size()) {
+        if (orders.size() != orderIds.size() || !orders.stream().allMatch(o -> isOwner(o.getCreatedBy(), username))) {
             throw new IllegalArgumentException("Some selected orders were not found");
         }
         Map<Long, Order> orderById = orders.stream().collect(Collectors.toMap(Order::getOrderId, Function.identity()));
@@ -112,7 +124,8 @@ public class JobService {
                     .sequenceNo(sequence++)
                     .createdBy(username)
                     .build());
-            order.setOrderStatus("IN_TRANSIT");
+            // งานใหม่ยังไม่ออกรถ — order เป็น IN_TRANSIT ตอนเริ่มงาน
+            order.setOrderStatus(OrderStatus.ASSIGNED);
             order.setUpdatedBy(username);
         }
         deliveryRoutingRepository.saveAll(routings);
@@ -134,7 +147,11 @@ public class JobService {
             throw new IllegalArgumentException("Duplicate orders in the selected stop list");
         }
 
-        DeliveryJob job = findActiveJob(jobId);
+        DeliveryJob job = findActiveJob(jobId, username);
+        // งานที่จบแล้ว: order ของจุดที่ข้ามถูกคืนเป็น PENDING ไปแล้ว (อาจอยู่ในงานใหม่) — แก้ไขแล้วจะไปทับสถานะ order
+        if ("COMPLETED".equalsIgnoreCase(job.getDeliveryStatus())) {
+            throw new IllegalArgumentException("Job " + jobId + " is already completed and cannot be edited");
+        }
         Subdistrict origin = resolveSubdistrict(request.getOriginSubdistrictCode(), "Origin");
 
         List<DeliveryRouting> existingRoutings = deliveryRoutingRepository.findByDeliveryJobJobId(jobId);
@@ -142,14 +159,14 @@ public class JobService {
                 .collect(Collectors.toMap(r -> r.getOrder().getOrderId(), Function.identity()));
         Set<Long> newOrderIdSet = Set.copyOf(newOrderIds);
 
-        // จุดที่ไม่อยู่ในลิสต์ใหม่แล้ว — ลบ routing และคืนสถานะ order กลับเป็น pending (ยกเว้นจุดที่จัดส่งไปแล้ว)
+        // จุดที่ไม่อยู่ในลิสต์ใหม่แล้ว — ลบ routing และคืนสถานะ order กลับเป็น NEW (ยกเว้นจุดที่ส่งแล้ว/ยกเลิกแล้ว)
         List<DeliveryRouting> toRemove = existingRoutings.stream()
                 .filter(r -> !newOrderIdSet.contains(r.getOrder().getOrderId()))
                 .toList();
         for (DeliveryRouting routing : toRemove) {
-            if (!"COMPLETED".equalsIgnoreCase(routing.getRoutingStatus())) {
+            if (!FINAL_STOP_STATUSES.contains(upper(routing.getRoutingStatus()))) {
                 Order order = routing.getOrder();
-                order.setOrderStatus("NEW");
+                order.setOrderStatus(OrderStatus.NEW);
                 order.setUpdatedBy(username);
                 orderRepository.save(order);
             }
@@ -163,7 +180,8 @@ public class JobService {
         Map<Long, Order> newOrdersById = Map.of();
         if (!orderIdsToAdd.isEmpty()) {
             List<Order> ordersToAdd = orderRepository.findAllById(orderIdsToAdd);
-            if (ordersToAdd.size() != orderIdsToAdd.size()) {
+            if (ordersToAdd.size() != orderIdsToAdd.size()
+                    || !ordersToAdd.stream().allMatch(o -> isOwner(o.getCreatedBy(), username))) {
                 throw new IllegalArgumentException("Some selected orders were not found");
             }
             for (Order order : ordersToAdd) {
@@ -184,7 +202,8 @@ public class JobService {
                 finalRoutings.add(routing);
             } else {
                 Order order = newOrdersById.get(orderId);
-                order.setOrderStatus("IN_TRANSIT");
+                order.setOrderStatus(JobStatus.IN_PROGRESS.equalsIgnoreCase(job.getDeliveryStatus())
+                        ? OrderStatus.IN_TRANSIT : OrderStatus.ASSIGNED);
                 order.setUpdatedBy(username);
                 orderRepository.save(order);
                 finalRoutings.add(DeliveryRouting.builder()
@@ -204,6 +223,8 @@ public class JobService {
         job.setTotalOrders(newOrderIds.size());
         job.setScheduledDate(request.getScheduledDate());
         job.setUpdatedBy(username);
+        // เอาจุดที่ยังเปิดอยู่ออกหมด → งานจบเลย เหมือนตอนส่ง/ข้ามจุดสุดท้าย
+        closeJobIfNoOpenStops(job, finalRoutings, username);
         DeliveryJob savedJob = deliveryJobRepository.save(job);
 
         return mapToResponse(savedJob, finalRoutings);
@@ -211,15 +232,15 @@ public class JobService {
 
     @Transactional
     public void deleteJob(Long jobId, String username) {
-        DeliveryJob job = findActiveJob(jobId);
+        DeliveryJob job = findActiveJob(jobId, username);
 
         // งานที่จบแล้ว: order ของจุดที่ข้ามถูกคืนเป็น PENDING ไปแล้ว (อาจอยู่ในงานใหม่) — ห้ามแตะซ้ำ
         boolean jobCompleted = "COMPLETED".equalsIgnoreCase(job.getDeliveryStatus());
         List<DeliveryRouting> routings = deliveryRoutingRepository.findByDeliveryJobJobId(jobId);
         for (DeliveryRouting routing : routings) {
-            if (!jobCompleted && !"COMPLETED".equalsIgnoreCase(routing.getRoutingStatus())) {
+            if (!jobCompleted && !FINAL_STOP_STATUSES.contains(upper(routing.getRoutingStatus()))) {
                 Order order = routing.getOrder();
-                order.setOrderStatus("NEW");
+                order.setOrderStatus(OrderStatus.NEW);
                 order.setUpdatedBy(username);
                 orderRepository.save(order);
             }
@@ -230,10 +251,18 @@ public class JobService {
         deliveryJobRepository.save(job);
     }
 
-    private DeliveryJob findActiveJob(Long jobId) {
+    /**
+     * Jobs and orders belong to the user who created them. Someone else's is reported exactly
+     * like a missing one, so ids cannot be probed.
+     */
+    private static boolean isOwner(String createdBy, String username) {
+        return username != null && username.equals(createdBy);
+    }
+
+    private DeliveryJob findActiveJob(Long jobId, String username) {
         DeliveryJob job = deliveryJobRepository.findById(jobId)
                 .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
-        if (!"A".equals(job.getStatus())) {
+        if (!"A".equals(job.getStatus()) || !isOwner(job.getCreatedBy(), username)) {
             throw new IllegalArgumentException("Job not found: " + jobId);
         }
         return job;
@@ -241,7 +270,11 @@ public class JobService {
 
     @Transactional
     public JobResponse completeStop(Long jobId, Long orderId, String username) {
-        DeliveryRouting routing = findStopOfOpenJob(jobId, orderId);
+        DeliveryRouting routing = findStopOfOpenJob(jobId, orderId, username);
+        if ("CANCELLED".equalsIgnoreCase(routing.getRoutingStatus())) {
+            throw new IllegalArgumentException("Stop for order " + orderId + " is already " + routing.getRoutingStatus());
+        }
+        startIfNotStarted(routing.getDeliveryJob(), username);
 
         // จุดที่ข้ามไว้ (SKIPPED) กลับมายืนยันส่งได้ ตราบใดที่งานยังไม่จบ
         routing.setRoutingStatus("COMPLETED");
@@ -249,8 +282,8 @@ public class JobService {
         deliveryRoutingRepository.save(routing);
 
         Order order = routing.getOrder();
-        order.setOrderStatus("COMPLETED");
-        order.setDeliveryDate(LocalDateTime.now());
+        order.setOrderStatus(OrderStatus.COMPLETED);
+        order.setDeliveryDate(LocalDateTime.now(clock));
         order.setUpdatedBy(username);
         orderRepository.save(order);
 
@@ -259,10 +292,11 @@ public class JobService {
 
     @Transactional
     public JobResponse skipStop(Long jobId, Long orderId, String username) {
-        DeliveryRouting routing = findStopOfOpenJob(jobId, orderId);
+        DeliveryRouting routing = findStopOfOpenJob(jobId, orderId, username);
         if (CLOSED_STOP_STATUSES.contains(upper(routing.getRoutingStatus()))) {
             throw new IllegalArgumentException("Stop for order " + orderId + " is already " + routing.getRoutingStatus());
         }
+        startIfNotStarted(routing.getDeliveryJob(), username);
 
         // order ยังอยู่ในงานนี้ (IN_TRANSIT) — จะคืนเป็น PENDING ตอนงานจบเท่านั้น
         routing.setRoutingStatus("SKIPPED");
@@ -272,37 +306,186 @@ public class JobService {
         return completeJobIfNoOpenStops(routing.getDeliveryJob(), username);
     }
 
-    private DeliveryRouting findStopOfOpenJob(Long jobId, Long orderId) {
+    /**
+     * เลิกทำ "ส่งแล้ว" (กดยืนยันผิดจุด) — ได้เฉพาะภายใน {@link #UNDO_COMPLETE_WINDOW} และงานยังไม่ปิด
+     * (ถ้าการยืนยันนั้นทำให้งานปิด order ที่ข้ามถูกปล่อยเป็น PENDING ไปแล้ว อาจอยู่ในงานอื่น)
+     * จุดกลับเป็น NEW (รอจัดส่ง) เสมอ แม้ก่อนยืนยันจะเป็นจุดที่ข้ามไว้
+     */
+    @Transactional
+    public JobResponse reopenStop(Long jobId, Long orderId, String username) {
+        DeliveryRouting routing = findStopOfOpenJob(jobId, orderId, username);
+        if (!"COMPLETED".equalsIgnoreCase(routing.getRoutingStatus())) {
+            throw new IllegalArgumentException("Stop for order " + orderId + " is not completed");
+        }
+        Order order = routing.getOrder();
+        LocalDateTime deliveredAt = order.getDeliveryDate();
+        if (deliveredAt == null || deliveredAt.plus(UNDO_COMPLETE_WINDOW).isBefore(LocalDateTime.now(clock))) {
+            throw new IllegalArgumentException("Stop for order " + orderId + " can no longer be undone");
+        }
+
+        routing.setRoutingStatus("NEW");
+        routing.setUpdatedBy(username);
+        deliveryRoutingRepository.save(routing);
+
+        order.setOrderStatus(OrderStatus.IN_TRANSIT);
+        order.setDeliveryDate(null);
+        order.setUpdatedBy(username);
+        orderRepository.save(order);
+
+        return completeJobIfNoOpenStops(routing.getDeliveryJob(), username);
+    }
+
+    /**
+     * ยกเลิกจุดส่ง — ลูกค้ายกเลิกระหว่างที่ order อยู่ในงาน: ทั้งจุดและ order เป็น CANCELLED
+     * จุดที่ยกเลิกนับเป็นจุดที่ปิดแล้ว ถ้าไม่เหลือจุดค้าง งานจบเลย
+     */
+    @Transactional
+    public JobResponse cancelStop(Long jobId, Long orderId, String username) {
+        DeliveryRouting routing = findStopOfOpenJob(jobId, orderId, username);
+        if (FINAL_STOP_STATUSES.contains(upper(routing.getRoutingStatus()))) {
+            throw new IllegalArgumentException("Stop for order " + orderId + " is already " + routing.getRoutingStatus());
+        }
+        startIfNotStarted(routing.getDeliveryJob(), username);
+
+        routing.setRoutingStatus("CANCELLED");
+        routing.setUpdatedBy(username);
+        deliveryRoutingRepository.save(routing);
+
+        Order order = routing.getOrder();
+        order.setOrderStatus(OrderStatus.CANCELLED);
+        order.setUpdatedBy(username);
+        orderRepository.save(order);
+
+        return completeJobIfNoOpenStops(routing.getDeliveryJob(), username);
+    }
+
+    /**
+     * ปิดงานเอง (เช่น จบวันแล้วยังส่งไม่ครบ) — จุดที่ยังค้างทั้งหมดถูกบันทึกว่าข้าม
+     * แล้วใช้กฎปิดงานเดิม: order ของจุดที่ข้ามคืนเป็น PENDING
+     */
+    @Transactional
+    public JobResponse closeJob(Long jobId, String username) {
+        DeliveryJob job = findActiveJob(jobId, username);
+        if ("COMPLETED".equalsIgnoreCase(job.getDeliveryStatus())) {
+            throw new IllegalArgumentException("Job " + jobId + " is already completed");
+        }
+        // งานที่ยังไม่ออกรถ ปิดไม่ได้ — ทุกจุดจะถูกนับเป็นการข้าม (และอาจทำให้ order เป็น FAILED) ทั้งที่ยังไม่ได้ไปส่ง
+        if (!JobStatus.IN_PROGRESS.equalsIgnoreCase(job.getDeliveryStatus())) {
+            throw new IllegalArgumentException("Job " + jobId + " has not started yet; delete it instead");
+        }
+
+        List<DeliveryRouting> routings = deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(jobId);
+        List<DeliveryRouting> openStops = routings.stream()
+                .filter(r -> !CLOSED_STOP_STATUSES.contains(upper(r.getRoutingStatus())))
+                .toList();
+        for (DeliveryRouting routing : openStops) {
+            routing.setRoutingStatus("SKIPPED");
+            routing.setUpdatedBy(username);
+        }
+        deliveryRoutingRepository.saveAll(openStops);
+
+        closeJobIfNoOpenStops(job, routings, username);
+        deliveryJobRepository.save(job);
+        return mapToResponse(job, routings);
+    }
+
+    /**
+     * เริ่มงาน (ออกรถ) — งาน NEW → IN_PROGRESS และ order ของจุดที่ยังค้าง ASSIGNED → IN_TRANSIT
+     */
+    @Transactional
+    public JobResponse startJob(Long jobId, String username) {
+        DeliveryJob job = findActiveJob(jobId, username);
+        if ("COMPLETED".equalsIgnoreCase(job.getDeliveryStatus())) {
+            throw new IllegalArgumentException("Job " + jobId + " is already completed");
+        }
+        if (JobStatus.IN_PROGRESS.equalsIgnoreCase(job.getDeliveryStatus())) {
+            throw new IllegalArgumentException("Job " + jobId + " has already started");
+        }
+        startIfNotStarted(job, username);
+        deliveryJobRepository.save(job);
+        return mapToResponse(job, deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(jobId));
+    }
+
+    /**
+     * คนส่งกดส่ง/ข้าม/ยกเลิกจุดโดยยังไม่กด "เริ่มงาน" → เริ่มงานให้อัตโนมัติ (ไม่บล็อกคนส่งที่ลืมกด)
+     * ผู้เรียกต้อง save job เอง (หรือปล่อยให้ dirty checking ภายใน transaction)
+     */
+    private void startIfNotStarted(DeliveryJob job, String username) {
+        if (!JobStatus.NEW.equalsIgnoreCase(job.getDeliveryStatus())) {
+            return;
+        }
+        job.setDeliveryStatus(JobStatus.IN_PROGRESS);
+        job.setUpdatedBy(username);
+        deliveryJobRepository.save(job);
+        for (DeliveryRouting r : deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(job.getJobId())) {
+            Order order = r.getOrder();
+            if (OrderStatus.ASSIGNED.equals(order.getOrderStatus())) {
+                order.setOrderStatus(OrderStatus.IN_TRANSIT);
+                order.setUpdatedBy(username);
+                orderRepository.save(order);
+            }
+        }
+    }
+
+    private DeliveryRouting findStopOfOpenJob(Long jobId, Long orderId, String username) {
         DeliveryRouting routing = deliveryRoutingRepository.findByDeliveryJobJobIdAndOrderOrderId(jobId, orderId)
+                .filter(r -> isOwner(r.getDeliveryJob().getCreatedBy(), username))
                 .orElseThrow(() -> new IllegalArgumentException(
                         "Delivery stop not found for job " + jobId + " and order " + orderId));
-        if ("COMPLETED".equalsIgnoreCase(routing.getDeliveryJob().getDeliveryStatus())) {
+        DeliveryJob job = routing.getDeliveryJob();
+        // งานที่ถูกลบ (soft-delete) — order ถูกคืนเป็น NEW ไปแล้ว (อาจอยู่ในงานใหม่) ห้ามแตะซ้ำ เช่นจากหน้ารายละเอียดที่เปิดค้างไว้
+        if (!"A".equals(job.getStatus())) {
+            throw new IllegalArgumentException("Job not found: " + jobId);
+        }
+        if ("COMPLETED".equalsIgnoreCase(job.getDeliveryStatus())) {
             throw new IllegalArgumentException("Job " + jobId + " is already completed");
         }
         return routing;
     }
 
-    // งานจบเมื่อทุกจุด ส่งแล้ว หรือ ข้าม — order ของจุดที่ข้ามคืนเป็น PENDING เพื่อจัดเข้างานรอบถัดไปได้
     private JobResponse completeJobIfNoOpenStops(DeliveryJob job, String username) {
         List<DeliveryRouting> allRoutings = deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(job.getJobId());
-        boolean noOpenStops = allRoutings.stream()
-                .allMatch(r -> CLOSED_STOP_STATUSES.contains(upper(r.getRoutingStatus())));
-        if (noOpenStops) {
-            for (DeliveryRouting r : allRoutings) {
-                if ("SKIPPED".equalsIgnoreCase(r.getRoutingStatus())) {
-                    Order order = r.getOrder();
-                    order.setOrderStatus("PENDING");
-                    order.setUpdatedBy(username);
-                    orderRepository.save(order);
-                }
-            }
-            job.setDeliveryStatus("COMPLETED");
-            job.setCompletedDate(LocalDateTime.now());
-            job.setUpdatedBy(username);
+        if (closeJobIfNoOpenStops(job, allRoutings, username)) {
             deliveryJobRepository.save(job);
         }
-
         return mapToResponse(job, allRoutings);
+    }
+
+    /**
+     * งานจบเมื่อทุกจุด ส่งแล้ว ข้าม หรือยกเลิก — order ของจุดที่ข้ามคืนเป็น PENDING เพื่อจัดเข้างานรอบถัดไปได้
+     * ยกเว้น order ที่ถูกข้ามครบ {@link #MAX_SKIPS_BEFORE_FAILED} ครั้ง (รวมงานนี้) เป็น FAILED
+     * คืน true ถ้างานถูกปิด (ผู้เรียกต้อง save job เอง)
+     */
+    private boolean closeJobIfNoOpenStops(DeliveryJob job, List<DeliveryRouting> routings, String username) {
+        boolean noOpenStops = routings.stream()
+                .allMatch(r -> CLOSED_STOP_STATUSES.contains(upper(r.getRoutingStatus())));
+        if (!noOpenStops) {
+            return false;
+        }
+        List<DeliveryRouting> skipped = routings.stream()
+                .filter(r -> "SKIPPED".equalsIgnoreCase(r.getRoutingStatus()))
+                .toList();
+        Map<Long, Long> skipCounts = skipped.isEmpty() ? Map.of() : countSkipsByOrder(skipped, job.getJobId());
+        for (DeliveryRouting r : skipped) {
+            Order order = r.getOrder();
+            long skips = skipCounts.getOrDefault(order.getOrderId(), 0L);
+            order.setOrderStatus(skips >= MAX_SKIPS_BEFORE_FAILED ? OrderStatus.FAILED : OrderStatus.PENDING);
+            order.setUpdatedBy(username);
+            orderRepository.save(order);
+        }
+        job.setDeliveryStatus("COMPLETED");
+        job.setCompletedDate(LocalDateTime.now());
+        job.setUpdatedBy(username);
+        return true;
+    }
+
+    private Map<Long, Long> countSkipsByOrder(List<DeliveryRouting> skipped, Long jobId) {
+        List<Long> orderIds = skipped.stream().map(r -> r.getOrder().getOrderId()).toList();
+        Map<Long, Long> counts = new HashMap<>();
+        for (Object[] row : deliveryRoutingRepository.countSkipsByOrder(orderIds, jobId)) {
+            counts.put((Long) row[0], ((Number) row[1]).longValue());
+        }
+        return counts;
     }
 
     private static String upper(String value) {
@@ -310,8 +493,8 @@ public class JobService {
     }
 
     @Transactional(readOnly = true)
-    public List<JobResponse> listJobs() {
-        List<DeliveryJob> jobs = deliveryJobRepository.findByStatusOrderByCreatedAtDesc("A");
+    public List<JobResponse> listJobs(String username) {
+        List<DeliveryJob> jobs = deliveryJobRepository.findByStatusAndCreatedByOrderByCreatedAtDesc("A", username);
         if (jobs.isEmpty()) {
             return List.of();
         }
@@ -352,7 +535,8 @@ public class JobService {
     public List<CandidateOrderResponse> getCandidateOrders(String fromSubdistrictCode,
                                                              String toSubdistrictCode,
                                                              String filterDistrictCode,
-                                                             String filterSubdistrictCode) {
+                                                             String filterSubdistrictCode,
+                                                             String username) {
         Subdistrict from = resolveSubdistrict(fromSubdistrictCode, "Reference point");
         Subdistrict to = StringUtils.hasText(toSubdistrictCode)
                 ? resolveSubdistrict(toSubdistrictCode, "Destination")
@@ -365,11 +549,8 @@ public class JobService {
         String districtFilter = StringUtils.hasText(filterDistrictCode) ? filterDistrictCode.trim() : null;
         String subdistrictFilter = StringUtils.hasText(filterSubdistrictCode) ? filterSubdistrictCode.trim() : null;
 
-        List<Order> candidates = orderRepository
-                .findCandidateOrdersForJob(provinceCodes, districtFilter, subdistrictFilter)
-                .stream()
-                .limit(MAX_CANDIDATE_ORDERS)
-                .toList();
+        List<Order> candidates = orderRepository.findCandidateOrdersForJob(
+                provinceCodes, districtFilter, subdistrictFilter, username, PageRequest.of(0, MAX_CANDIDATE_ORDERS));
         if (candidates.isEmpty()) {
             return List.of();
         }
@@ -443,7 +624,7 @@ public class JobService {
      * ถอยไปใช้ระยะเส้นตรง — ตำแหน่งทุกจุดคือจุดกลางตำบล ไม่ใช่ที่อยู่จริงของ order
      */
     @Transactional(readOnly = true)
-    public RoutePreviewResponse previewRoute(RoutePreviewRequest request) {
+    public RoutePreviewResponse previewRoute(RoutePreviewRequest request, String username) {
         List<Long> orderIds = request.getOrderIds() == null ? List.of() : request.getOrderIds();
         if (orderIds.size() > MAX_ORDERS_PER_JOB) {
             throw new IllegalArgumentException("A job cannot contain more than " + MAX_ORDERS_PER_JOB + " orders");
@@ -471,7 +652,7 @@ public class JobService {
         int stopNo = 0;
         for (Long orderId : orderIds) {
             Order order = orderById.get(orderId);
-            if (order == null) {
+            if (order == null || !isOwner(order.getCreatedBy(), username)) {
                 throw new IllegalArgumentException("Order not found: " + orderId);
             }
             Subdistrict subdistrict = order.getAddress() != null && order.getAddress().getSubdistrictCode() != null
@@ -771,6 +952,10 @@ public class JobService {
                         .address(mapToAddressResponse(r.getOrder().getAddress()))
                         .sequenceNo(r.getSequenceNo())
                         .routingStatus(r.getRoutingStatus())
+                        .orderStatus(r.getOrder().getOrderStatus())
+                        .tel(r.getOrder().getCustomer() != null ? r.getOrder().getCustomer().getPhone() : null)
+                        .detail(r.getOrder().getDetail())
+                        .deliveredAt(r.getOrder().getDeliveryDate())
                         .build())
                 .toList();
 
