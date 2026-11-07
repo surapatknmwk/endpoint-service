@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 
 @Data
 @Builder
@@ -29,6 +30,9 @@ public class CandidateOrderResponse {
 
     @Schema(description = "Order status", example = "PENDING")
     private String orderStatus;
+
+    @Schema(description = "Appointment date agreed with the customer; null = no appointment", example = "2026-11-12")
+    private LocalDate appointmentDate;
 
     @Schema(description = "Distance in km from the reference (fromSubdistrictCode) point; null when no distance data exists for this pair", example = "3.42")
     private BigDecimal distanceKm;

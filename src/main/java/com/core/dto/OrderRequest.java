@@ -7,6 +7,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Data
@@ -111,6 +112,10 @@ public class OrderRequest {
 
     @Schema(description = "Expected delivery date", example = "2024-12-31")
     private LocalDateTime deliveryDate;
+
+    @Schema(description = "Appointment date agreed with the customer (optional); null = no appointment",
+            example = "2026-11-12")
+    private LocalDate appointmentDate;
 
     
 }

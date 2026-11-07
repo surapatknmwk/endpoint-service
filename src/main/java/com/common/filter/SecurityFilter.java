@@ -5,6 +5,8 @@ import com.authen.service.AuthenticationService;
 import com.authen.service.SecurityEventRecorder;
 import com.common.dto.ApiResponse;
 import com.common.exception.InvalidTokenException;
+import com.common.exception.PermissionDeniedException;
+import com.common.exception.SessionReplacedException;
 import com.common.exception.TokenExpiredException;
 import com.core.service.security.SecurityService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -76,7 +78,18 @@ public class SecurityFilter extends OncePerRequestFilter {
 
         log.info("=============== [{}] {}", request.getMethod(), path);
 
-        if (isExcludedPath(path) || !filterEnabled) {
+        if (isExcludedPath(path)) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
+        if (!filterEnabled) {
+            // filter off (default profile): no token / permission check, but "one session per account" still
+            // applies — a token whose session was replaced by a login elsewhere is refused in every profile
+            if (isReplacedSessionToken(request)) {
+                sendSessionReplaced(response);
+                return;
+            }
             filterChain.doFilter(request, response);
             return;
         }
@@ -84,10 +97,14 @@ public class SecurityFilter extends OncePerRequestFilter {
         try {
             validateToken(request, path);
             filterChain.doFilter(request, response);
+        } catch (SessionReplacedException e) {
+            sendSessionReplaced(response);
         } catch (TokenExpiredException e) {
             sendErrorResponse(response, HttpStatus.UNAUTHORIZED, e.getMessage());
         } catch (InvalidTokenException e) {
             sendErrorResponse(response, HttpStatus.UNAUTHORIZED, e.getMessage());
+        } catch (PermissionDeniedException e) {
+            sendErrorResponse(response, HttpStatus.FORBIDDEN, e.getMessage());
         }
     }
 
@@ -123,7 +140,7 @@ public class SecurityFilter extends OncePerRequestFilter {
         if (checkPermission != null) {
             securityEventRecorder.record(SecurityEventType.PERMISSION_DENIED, request,
                     securityService.extractUsernameFromToken(authHeader), checkPermission);
-            throw new InvalidTokenException(checkPermission);
+            throw new PermissionDeniedException(checkPermission);
         }
 
         if (path.startsWith(SEARCH_PREFIX)) {
@@ -137,9 +154,13 @@ public class SecurityFilter extends OncePerRequestFilter {
     private void validateTokenLocally(String token) {
         try {
             if (!authenticationService.validateToken(token)) {
+                // extra lookup only on the failure path: tell "logged in elsewhere" apart from "expired"
+                if (authenticationService.isSessionReplaced(token)) {
+                    throw new SessionReplacedException();
+                }
                 throw new TokenExpiredException("Token is invalid or expired");
             }
-        } catch (TokenExpiredException e) {
+        } catch (TokenExpiredException | SessionReplacedException e) {
             throw e;
         } catch (Exception e) {
             log.error("Error validating token: {}", e.getMessage());
@@ -175,6 +196,23 @@ public class SecurityFilter extends OncePerRequestFilter {
         String contextPath = request.getContextPath();
         String uri = request.getRequestURI();
         return contextPath.isEmpty() ? uri : uri.substring(contextPath.length());
+    }
+
+    private boolean isReplacedSessionToken(HttpServletRequest request) {
+        String authHeader = request.getHeader(tokenHeader);
+        if (authHeader == null || !authHeader.startsWith(tokenPrefix + " ")) {
+            return false;
+        }
+        String token = authHeader.substring((tokenPrefix + " ").length());
+        return !token.isEmpty() && authenticationService.isSessionReplaced(token);
+    }
+
+    private void sendSessionReplaced(HttpServletResponse response) throws IOException {
+        response.setStatus(HttpStatus.UNAUTHORIZED.value());
+        response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        response.setCharacterEncoding("UTF-8");
+        response.getWriter().write(objectMapper.writeValueAsString(ApiResponse.errorWithCode(
+                HttpStatus.UNAUTHORIZED.value(), SessionReplacedException.CODE, SessionReplacedException.MESSAGE)));
     }
 
     private void sendErrorResponse(HttpServletResponse response, HttpStatus status, String message) throws IOException {

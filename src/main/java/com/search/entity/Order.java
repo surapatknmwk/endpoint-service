@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Data
@@ -71,6 +72,9 @@ public class Order {
 
     @Column(name = "delivery_date")
     private LocalDateTime deliveryDate;
+
+    @Column(name = "appointment_date")
+    private LocalDate appointmentDate;
 
     @Column(name = "status")
     @Builder.Default

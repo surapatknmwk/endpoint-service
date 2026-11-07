@@ -12,6 +12,16 @@ server:
 spring:
   application:
     name: endpoint-services
+  # machine-only overrides (secrets, LAN IPs) — gitignored; absent on the server = ignored
+  config:
+    import: "optional:classpath:application-local.yml"
+
+  # Threads shared by every @Scheduled task (default is 1, so one slow task would delay the others).
+  task:
+    scheduling:
+      pool:
+        size: 3
+      thread-name-prefix: sched-
 
   # Shared PostgreSQL database (all modules used the same endpoint_db)
   datasource:
@@ -50,6 +60,8 @@ spring:
 jwt:
   secret: YourSuperSecretKeyThatIsAtLeast256BitsLongForHS256Algorithm
   expiration: 3600000
+  # login again after this many days even if the webapp keeps refreshing (0 = no limit)
+  session-max-age-days: 7
 
 # ---- Password encryption (authentication module) ----
 # AES-256 key, Base64 of 32 random bytes (openssl rand -base64 32). Local-only value;
@@ -106,6 +118,76 @@ google:
     # configuration ไม่มีแถว code 'GR_DAILY' (หรือไม่ active/ค่าไม่ถูกต้อง) ค่าจริงแก้ได้ตลอดที่ configuration.value_1
     # ผลที่ cache ไว้ใน subdistrict_distances ไม่นับ; เกินแล้วตอบ 429 (ดูสถิติที่ GET .../google-distance/usage)
     daily-request-limit: 100
+
+# ---- Self-registration + LINE Login (docs/user-stories/register.md, RegistrationProperties) ----
+# Not repeated in application-prod.yml: prod reads the same keys, override with the env vars.
+registration:
+  enabled: ${REGISTRATION_ENABLED:true}
+  default-role: NORMAL          # role of an "เจ้าของร้าน" sign-up (DRIVER for "คนส่ง")
+  terms-version: "1"
+  max-per-ip-per-hour: 5
+# Real local values (secret, token, LAN IP) live in application-local.yml (gitignored, see spring.config.import).
+line:
+  login:
+    enabled: ${LINE_LOGIN_ENABLED:false}
+    channel-id: ${LINE_CHANNEL_ID:}
+    channel-secret: ${LINE_CHANNEL_SECRET:}       # env only — never commit
+    redirect-uri: ${LINE_REDIRECT_URI:}           # must equal the Callback URL on the LINE channel
+    attempt-ttl-seconds: 600
+    ticket-ttl-seconds: 900
+  # Copy some bell notifications to the recipient's LINE chat (docs/task/enhanment/lineNotify/design.md).
+  # Needs a Messaging API channel under the SAME provider as the login channel above.
+  messaging:
+    enabled: ${LINE_MESSAGING_ENABLED:false}
+    channel-access-token: ${LINE_MESSAGING_TOKEN:}   # long-lived token — env only, never commit
+    add-friend-url: ${LINE_ADD_FRIEND_URL:}          # https://line.me/R/ti/p/@xxxx
+    webapp-base-url: ${WEBAPP_BASE_URL:}             # link on the card's "เปิดดู" button
+    types: JOB_REQUESTED,JOB_REQUEST_ACCEPTED,JOB_REQUEST_DECLINED,TEAM_INVITED,JOB_DUE_TOMORROW,ORDER_DUE_SOON,STOP_CANCEL_REQUESTED,JOB_REQUEST_EXPIRED,JOB_RELEASED,JOB_NOT_STARTED
+    quiet-from: "21:00"                              # created during quiet hours = sent at quiet-to
+    quiet-to: "07:00"
+    max-attempts: 3
+    max-age-hours: 24
+
+# ---- Scheduled tasks (com.core.service.scheduler) ----
+# Every task lives under scheduler.<name>. Cron fields: second minute hour day month weekday,
+# Asia/Bangkok time. "-" turns a task off. Not repeated in application-prod.yml.
+scheduler:
+  # "พรุ่งนี้มีนัดส่งงาน" for jobs scheduled tomorrow that have not started. Safe to run often:
+  # one notification per job + date; hourly so jobs created later in the day are reminded too.
+  job-due-reminder:
+    cron: "0 5 * * * *"
+  # "ออเดอร์ใกล้ถึงวันนัดส่ง": order ที่ยังไม่ได้จัดเข้างาน นัดภายใน 7 วัน — 1 แจ้งเตือนต่อเจ้าของต่อวัน
+  # แต่ละ order เตือนครั้งเดียวต่อวันนัด · 07:00 = พ้นช่วงเงียบของ LINE พอดี
+  order-due-reminder:
+    cron: "0 0 7 * * *"
+  notification-cleanup:
+    cron: "0 5 3 * * *"
+    retention-days: 90
+  # ลบแถว user_sessions ที่หมดอายุแล้ว (ปกติจะถูกลบเฉพาะตอนมีคนเอา token เก่ามายิง)
+  session-cleanup:
+    cron: "0 10 3 * * *"
+  # ประกาศระบบ (system_announcements): ส่งประกาศที่ถึง publish_at + ถอนที่ยกเลิก / หมดอายุ
+  announcement:
+    cron: "0 */5 * * * *"
+  # คำขอรับงานที่คนส่งไม่ตอบ → EXPIRED + แจ้งเจ้าของ (กฎเวลาอยู่ที่ job-request ด้านล่าง)
+  job-request-expiry:
+    cron: "0 */10 * * * *"
+  # งานที่นัดวันนี้ มีคนส่งแล้ว แต่เลย job-request.late-start-hour ยังไม่เริ่ม → แจ้งเจ้าของ + คนส่ง (ครั้งเดียวต่องานต่อวัน)
+  job-late-start:
+    cron: "0 15 * * * *"
+  # ส่งแจ้งเตือนที่รอส่ง LINE (notifications.line_status = PENDING) — ไม่ทำอะไรเมื่อ line.messaging.enabled=false
+  line-delivery:
+    cron: "0 * * * * *"
+
+# ---- คำขอรับงาน / งานไม่เริ่ม (driver-risk รอบ 3 · com.core.service.team.JobRequestPolicy) ----
+# คำขอหมดอายุที่ requested_at + ttl-hours หรือ cutoff-hour:00 ของวันนัด แล้วแต่อย่างไหนถึงก่อน
+# แต่ให้เวลาตอบอย่างน้อย min-hours เสมอ (วันนัดเก็บแค่วันที่ — ขอวันเดียวกับวันนัดจะได้ไม่หมดอายุทันที)
+job-request:
+  ttl-hours: 24
+  cutoff-hour: 8
+  min-hours: 2
+  # ถึงวันนัดแล้ว เลยเวลานี้งานยังไม่เริ่ม = เตือน
+  late-start-hour: 10
 
 # ---- Search module tuning ----
 search:

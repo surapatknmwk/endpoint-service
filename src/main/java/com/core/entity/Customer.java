@@ -55,10 +55,10 @@ public class Customer {
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 
-    @Column(name = "created_by", length = 20)
+    @Column(name = "created_by", length = 50)
     private String createdBy;
 
-    @Column(name = "updated_by", length = 20)
+    @Column(name = "updated_by", length = 50)
     private String updatedBy;
 
     @PrePersist

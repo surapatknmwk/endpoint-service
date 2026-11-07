@@ -22,6 +22,8 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import java.time.Clock;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -33,14 +35,21 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class OrderSearchService {
 
+    // same window as com.core.service.notification.reminder.OrderDueReminderService.DAYS_AHEAD
+    static final int DUE_SOON_DAYS = 7;
+
     private final SearchOrderRepository orderRepository;
     private final MasterDataService masterDataService;
+    private final Clock clock;
 
     @Transactional(readOnly = true)
     public PageResponse<OrderResponse> searchOrders(OrderSearchRequest request) {
         Specification<Order> spec = Specification.where(null);
 
-        if (!StringUtils.isBlank(request.getCreatedBy())) {
+        // Orders belong to their creator: an unknown caller sees nothing, never everyone's orders.
+        if (StringUtils.isBlank(request.getCreatedBy())) {
+            spec = spec.and((root, query, cb) -> cb.disjunction());
+        } else {
             spec = spec.and((root, query, cb)
                     -> cb.equal(root.get("createdBy"), request.getCreatedBy()));
         }
@@ -65,6 +74,14 @@ public class OrderSearchService {
         if (request.getOrderStatus() != null && !request.getOrderStatus().isEmpty()) {
             spec = spec.and((root, query, cb)
                     -> cb.equal(root.get("orderStatus"), request.getOrderStatus()));
+        }
+
+        // ใกล้ถึงวันนัดส่ง: ยังไม่ได้จัดเข้างาน และนัดภายใน 7 วัน — กฎเดียวกับ OrderDueReminderService
+        if (Boolean.TRUE.equals(request.getDueSoon())) {
+            LocalDate today = LocalDate.now(clock);
+            spec = spec.and((root, query, cb) -> cb.and(
+                    root.get("orderStatus").in("NEW", "PENDING"),
+                    cb.between(root.get("appointmentDate"), today, today.plusDays(DUE_SOON_DAYS))));
         }
 
         if (request.getProvinceId() != null && request.getProvinceId() != 0) {
@@ -156,6 +173,7 @@ public class OrderSearchService {
                 .detail(order.getDetail())
                 .remark(order.getRemark())
                 .orderStatus(order.getOrderStatus())
+                .appointmentDate(order.getAppointmentDate())
                 .createdAt(order.getCreatedAt())
                 .updatedAt(order.getUpdatedAt())
                 .build();

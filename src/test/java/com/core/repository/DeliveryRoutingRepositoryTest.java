@@ -65,8 +65,12 @@ class DeliveryRoutingRepositoryTest {
     }
 
     private void stop(DeliveryJob job, Order order, String routingStatus) {
+        stop(job, order, routingStatus, null);
+    }
+
+    private void stop(DeliveryJob job, Order order, String routingStatus, String statusReason) {
         em.persist(DeliveryRouting.builder().deliveryJob(job).order(order).sequenceNo(1)
-                .routingStatus(routingStatus).build());
+                .routingStatus(routingStatus).statusReason(statusReason).build());
     }
 
     private Map<Long, Long> counts(List<Long> orderIds, Long jobId) {
@@ -137,5 +141,23 @@ class DeliveryRoutingRepositoryTest {
                 .containsEntry(a.getOrderId(), 2L)
                 .containsEntry(b.getOrderId(), 1L)
                 .doesNotContainKey(c.getOrderId());
+    }
+
+    @Test
+    void should_notCountSkipsMadeByClosingTheJob_when_counting() {
+        //GIVEN — order A: ข้ามเอง (เหตุผลคนส่ง) 1 + ปิดงานก่อนไปส่ง 1 + แจ้งยกเลิกค้างตอนปิดงาน 1 + ข้อมูลเก่าไม่มีเหตุผล 1
+        Order a = order("A");
+        DeliveryJob current = job("JOB-CURRENT", "IN_PROGRESS", "A");
+        stop(job("JOB-1", "COMPLETED", "A"), a, "SKIPPED", "CUSTOMER_ABSENT");
+        stop(job("JOB-2", "COMPLETED", "A"), a, "SKIPPED", "JOB_CLOSED");
+        stop(job("JOB-3", "COMPLETED", "A"), a, "SKIPPED", "CANCEL_NOT_APPROVED");
+        stop(current, a, "SKIPPED", null);
+        em.flush();
+
+        //WHEN
+        Map<Long, Long> result = counts(List.of(a.getOrderId()), current.getJobId());
+
+        //THEN — นับเฉพาะที่ข้ามจริง (มีเหตุผลของคนส่ง หรือข้อมูลก่อนมีเหตุผล)
+        assertThat(result).containsEntry(a.getOrderId(), 2L);
     }
 }

@@ -39,6 +39,13 @@ public class DeliveryRouting {
     @Builder.Default
     private String routingStatus = "NEW";
 
+    // ทำไมถึงข้าม / ยกเลิก (StopReason) + รายละเอียดที่พิมพ์ — ล้างเมื่อจุดกลับมาเป็นรอจัดส่ง
+    @Column(name = "status_reason", length = 30)
+    private String statusReason;
+
+    @Column(name = "status_note", length = 200)
+    private String statusNote;
+
     @Column(name = "notes", columnDefinition = "TEXT")
     private String notes;
 
@@ -48,10 +55,10 @@ public class DeliveryRouting {
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 
-    @Column(name = "created_by", length = 20)
+    @Column(name = "created_by", length = 50)
     private String createdBy;
 
-    @Column(name = "updated_by", length = 20)
+    @Column(name = "updated_by", length = 50)
     private String updatedBy;
 
     @PrePersist

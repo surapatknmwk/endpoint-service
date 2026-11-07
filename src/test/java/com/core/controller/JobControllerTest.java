@@ -5,7 +5,9 @@ import com.core.dto.JobRequest;
 import com.core.dto.JobResponse;
 import com.core.dto.RoutePreviewRequest;
 import com.core.dto.RoutePreviewResponse;
+import com.core.dto.StopActionRequest;
 import com.core.service.JobService;
+import com.core.service.team.JobDriverRequestService;
 import com.core.service.security.SecurityService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -28,9 +30,12 @@ import static org.mockito.Mockito.when;
 class JobControllerTest {
 
     private static final String AUTH_HEADER = "Bearer jwt-token";
+    private static final StopActionRequest BODY = new StopActionRequest("CUSTOMER_ABSENT", null);
 
     @Mock
     private JobService jobService;
+    @Mock
+    private JobDriverRequestService jobDriverRequestService;
     @Mock
     private SecurityService securityService;
 
@@ -38,7 +43,7 @@ class JobControllerTest {
 
     @BeforeEach
     void setUp() {
-        controller = new JobController(jobService, securityService);
+        controller = new JobController(jobService, jobDriverRequestService, securityService);
         when(securityService.extractUsernameFromToken(AUTH_HEADER)).thenReturn("admin");
     }
 
@@ -131,10 +136,10 @@ class JobControllerTest {
     void should_completeStopAsExtractedUser_when_completing() {
         //GIVEN
         JobResponse updated = JobResponse.builder().jobId(1L).build();
-        when(jobService.completeStop(1L, 10L, "admin")).thenReturn(updated);
+        when(jobService.completeStop(1L, 10L, null, "admin")).thenReturn(updated);
 
         //WHEN
-        var response = controller.completeStop(AUTH_HEADER, 1L, 10L);
+        var response = controller.completeStop(AUTH_HEADER, 1L, 10L, null);
 
         //THEN
         assertThat(response.getBody().getData()).isSameAs(updated);
@@ -145,10 +150,10 @@ class JobControllerTest {
     void should_skipStopAsExtractedUser_when_skipping() {
         //GIVEN
         JobResponse updated = JobResponse.builder().jobId(1L).build();
-        when(jobService.skipStop(1L, 10L, "admin")).thenReturn(updated);
+        when(jobService.skipStop(1L, 10L, BODY, "admin")).thenReturn(updated);
 
         //WHEN
-        var response = controller.skipStop(AUTH_HEADER, 1L, 10L);
+        var response = controller.skipStop(AUTH_HEADER, 1L, 10L, BODY);
 
         //THEN
         assertThat(response.getBody().getData()).isSameAs(updated);
@@ -187,10 +192,10 @@ class JobControllerTest {
     void should_cancelStopAsExtractedUser_when_cancelling() {
         //GIVEN
         JobResponse updated = JobResponse.builder().jobId(1L).build();
-        when(jobService.cancelStop(1L, 10L, "admin")).thenReturn(updated);
+        when(jobService.cancelStop(1L, 10L, BODY, "admin")).thenReturn(updated);
 
         //WHEN
-        var response = controller.cancelStop(AUTH_HEADER, 1L, 10L);
+        var response = controller.cancelStop(AUTH_HEADER, 1L, 10L, BODY);
 
         //THEN
         assertThat(response.getBody().getData()).isSameAs(updated);

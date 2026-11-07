@@ -1,6 +1,7 @@
 package com.search.controller;
 
 import com.common.dto.ApiResponse;
+import com.core.service.security.SecurityService;
 import com.search.dto.request.OrderSearchRequest;
 import com.search.service.OrderSearchService;
 import org.junit.jupiter.api.BeforeEach;
@@ -11,26 +12,31 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.mock.web.MockHttpServletRequest;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
- * Covers {@link OrderSearchController}: the search is always scoped to the user the security
- * filter identified, never to a {@code createdBy} the client sends.
+ * Covers {@link OrderSearchController}: the search is always scoped to the user in the token,
+ * never to a {@code createdBy} the client sends — also when the security filter is off.
  */
 @ExtendWith(MockitoExtension.class)
 class OrderSearchControllerTest {
 
+    private static final String AUTH = "Bearer token";
+
     @Mock
     private OrderSearchService orderSearchService;
+
+    @Mock
+    private SecurityService securityService;
 
     private OrderSearchController controller;
 
     @BeforeEach
     void setUp() {
-        controller = new OrderSearchController(orderSearchService);
+        controller = new OrderSearchController(orderSearchService, securityService);
     }
 
     private OrderSearchRequest searchedRequest() {
@@ -40,13 +46,12 @@ class OrderSearchControllerTest {
     }
 
     @Test
-    void should_searchAsLoggedInUser_when_filterIdentifiedTheUser() {
+    void should_searchAsLoggedInUser_when_tokenIdentifiesTheUser() {
         //GIVEN
-        MockHttpServletRequest httpRequest = new MockHttpServletRequest();
-        httpRequest.setAttribute("currentUserId", "usera");
+        when(securityService.extractUsernameFromToken(AUTH)).thenReturn("usera");
 
         //WHEN
-        ResponseEntity<? extends ApiResponse<?>> response = controller.searchOrders(new OrderSearchRequest(), httpRequest);
+        ResponseEntity<? extends ApiResponse<?>> response = controller.searchOrders(AUTH, new OrderSearchRequest());
 
         //THEN
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
@@ -58,26 +63,26 @@ class OrderSearchControllerTest {
         //GIVEN
         OrderSearchRequest request = new OrderSearchRequest();
         request.setCreatedBy("userb");
-        MockHttpServletRequest httpRequest = new MockHttpServletRequest();
-        httpRequest.setAttribute("currentUserId", "usera");
+        when(securityService.extractUsernameFromToken(AUTH)).thenReturn("usera");
 
         //WHEN
-        controller.searchOrders(request, httpRequest);
+        controller.searchOrders(AUTH, request);
 
         //THEN
         assertThat(searchedRequest().getCreatedBy()).isEqualTo("usera");
     }
 
     @Test
-    void should_clearClientSuppliedCreatedBy_when_filterIsDisabledAndNoUserIsKnown() {
-        //GIVEN - default profile: the security filter does not run, so no user attribute
+    void should_clearClientSuppliedCreatedBy_when_tokenHasNoUser() {
+        //GIVEN
         OrderSearchRequest request = new OrderSearchRequest();
         request.setCreatedBy("userb");
+        when(securityService.extractUsernameFromToken(AUTH)).thenReturn(null);
 
         //WHEN
-        controller.searchOrders(request, new MockHttpServletRequest());
+        controller.searchOrders(AUTH, request);
 
-        //THEN - unscoped search (every user's orders); see docs/security-check-list.md item 14
+        //THEN - OrderSearchService then returns no orders
         assertThat(searchedRequest().getCreatedBy()).isNull();
     }
 }

@@ -1,18 +1,19 @@
 package com.search.controller;
 
 import com.common.dto.ApiResponse;
+import com.core.service.security.SecurityService;
 import com.search.dto.request.OrderSearchRequest;
 import com.search.dto.response.OrderResponse;
 import com.search.dto.response.PageResponse;
 import com.search.service.OrderSearchService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -24,6 +25,7 @@ import org.springframework.web.bind.annotation.*;
 public class OrderSearchController {
 
     private final OrderSearchService orderSearchService;
+    private final SecurityService securityService;
 
     @Operation(summary = "Search orders", description = "Search orders by customer ID and/or platform ID with pagination")
     @ApiResponses(value = {
@@ -39,8 +41,11 @@ public class OrderSearchController {
             )
     })
     @PostMapping
-    public ResponseEntity<ApiResponse<PageResponse<OrderResponse>>> searchOrders(@RequestBody OrderSearchRequest request, HttpServletRequest httpRequest) {
-        request.setCreatedBy((String) httpRequest.getAttribute("currentUserId"));
+    public ResponseEntity<ApiResponse<PageResponse<OrderResponse>>> searchOrders(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
+            @RequestBody OrderSearchRequest request) {
+        // Always scope to the caller, even when SecurityFilter is off (non-prod profiles).
+        request.setCreatedBy(securityService.extractUsernameFromToken(authHeader));
         PageResponse<OrderResponse> data = orderSearchService.searchOrders(request);
         ApiResponse<PageResponse<OrderResponse>> response = ApiResponse.success(data, "Orders retrieved successfully");
         return ResponseEntity.ok(response);

@@ -56,16 +56,20 @@ public class DeliveryJob {
     @Column(name = "completed_date")
     private LocalDateTime completedDate;
 
+    // the one driver (users.user_id) who works the job; null = not assigned, only the owner works it
+    @Column(name = "assigned_driver_id")
+    private Integer assignedDriverId;
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 
-    @Column(name = "created_by", length = 20)
+    @Column(name = "created_by", length = 50)
     private String createdBy;
 
-    @Column(name = "updated_by", length = 20)
+    @Column(name = "updated_by", length = 50)
     private String updatedBy;
 
     @OneToMany(mappedBy = "deliveryJob", cascade = CascadeType.ALL, fetch = FetchType.LAZY)

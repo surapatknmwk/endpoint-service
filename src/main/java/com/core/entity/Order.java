@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Entity
@@ -72,6 +73,14 @@ public class Order {
     @Column(name = "delivery_date")
     private LocalDateTime deliveryDate;
 
+    // วันนัดส่งกับลูกค้า (ไม่บังคับ) — ต่างจาก deliveryDate ซึ่งเป็นเวลาที่ส่งถึงจริง
+    @Column(name = "appointment_date")
+    private LocalDate appointmentDate;
+
+    // appointmentDate ที่แจ้งเตือน "ใกล้ถึงวันนัดส่ง" ไปแล้ว (OrderDueReminderService)
+    @Column(name = "appointment_reminded_date")
+    private LocalDate appointmentRemindedDate;
+
     @Column(name = "status", length = 1)
     @Builder.Default
     private String status = "A";
@@ -82,10 +91,10 @@ public class Order {
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 
-    @Column(name = "created_by", length = 20)
+    @Column(name = "created_by", length = 50)
     private String createdBy;
 
-    @Column(name = "updated_by", length = 20)
+    @Column(name = "updated_by", length = 50)
     private String updatedBy;
 
     @PrePersist

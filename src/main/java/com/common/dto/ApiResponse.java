@@ -27,6 +27,10 @@ public class ApiResponse<T> {
     @Schema(description = "Response message", example = "Success")
     private String message;
 
+    @Schema(description = "Machine-readable error code when the client must react to a specific case",
+            example = "SESSION_REPLACED")
+    private String code;
+
     @Schema(description = "Response data payload")
     private T data;
 
@@ -108,6 +112,16 @@ public class ApiResponse<T> {
         return ApiResponse.<T>builder()
                 .success(false)
                 .status(status)
+                .message(message)
+                .timestamp(LocalDateTime.now())
+                .build();
+    }
+
+    public static <T> ApiResponse<T> errorWithCode(int status, String code, String message) {
+        return ApiResponse.<T>builder()
+                .success(false)
+                .status(status)
+                .code(code)
                 .message(message)
                 .timestamp(LocalDateTime.now())
                 .build();

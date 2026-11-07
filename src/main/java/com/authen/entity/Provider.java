@@ -37,6 +37,6 @@ public class Provider {
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
 
-    @Column(name = "created_by", length = 20)
+    @Column(name = "created_by", length = 50)
     private String createdBy;
 }

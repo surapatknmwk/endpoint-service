@@ -1,10 +1,23 @@
 package com.core.service;
 
+import com.authen.entity.User;
+import com.authen.repository.UserRepository;
+import com.core.constant.JobAccess;
+import com.core.constant.JobEventType;
+import com.core.constant.StopReason;
+import com.core.dto.GeoPoint;
+import com.core.dto.JobEventResponse;
+import com.core.dto.StopActionRequest;
+import com.core.entity.DeliveryJobEvent;
+import com.core.repository.DeliveryJobEventRepository;
+import com.core.service.notification.TeamNotifier;
+import com.core.service.team.TeamService;
 import com.core.constant.JobStatus;
 import com.core.constant.OrderStatus;
 import com.core.dto.CandidateOrderResponse;
 import com.core.dto.JobRequest;
 import com.core.dto.JobResponse;
+import com.core.dto.TeamUserSummary;
 import com.core.dto.OrderResponse;
 import com.core.dto.RoutePreviewRequest;
 import com.core.dto.RoutePreviewResponse;
@@ -18,6 +31,8 @@ import com.core.repository.DeliveryRoutingRepository;
 import com.core.repository.OrderRepository;
 import com.common.util.GeoDistance;
 import com.core.service.clients.MasterDataService;
+import com.core.service.team.JobAccessService;
+import com.core.service.team.JobDriverRequestService;
 import com.master.entity.Subdistrict;
 import com.master.entity.SubdistrictDistance;
 import com.master.repository.SubdistrictDistanceRepository;
@@ -60,8 +75,15 @@ public class JobService {
     private static final int MAX_CANDIDATE_ORDERS = 500;
     private static final int MAX_CANDIDATE_RESULTS = 10;
     private static final Set<String> PENDING_STATUSES = Set.of(OrderStatus.NEW, OrderStatus.PENDING);
-    // routing status ที่ถือว่าจุดนั้น "ปิดแล้ว" สำหรับการตัดสินว่างานจบหรือยัง
-    private static final Set<String> CLOSED_STOP_STATUSES = Set.of("COMPLETED", "SKIPPED", "CANCELLED");
+    // routing status ของจุดส่ง (delivery_routing.routing_status)
+    private static final String STOP_COMPLETED = "COMPLETED";
+    private static final String STOP_SKIPPED = "SKIPPED";
+    private static final String STOP_CANCELLED = "CANCELLED";
+    // คนส่งแจ้งว่าลูกค้ายกเลิก รอเจ้าของอนุมัติ — order ยังไม่เปลี่ยน
+    private static final String STOP_CANCEL_REQUESTED = "CANCEL_REQUESTED";
+    // จุดที่จัดการแล้ว ไม่ต้องไปส่ง (ไม่ใช่ "จุดถัดไป") — จุดที่ไม่อยู่ในนี้คือจุดค้าง
+    private static final Set<String> HANDLED_STOP_STATUSES =
+            Set.of(STOP_COMPLETED, STOP_SKIPPED, STOP_CANCELLED, STOP_CANCEL_REQUESTED);
     // order ที่ถูกข้ามครบจำนวนนี้ (นับจากงานที่ปิดแล้ว) เป็น FAILED ตอนงานปิด แทนที่จะกลับไป PENDING
     static final int MAX_SKIPS_BEFORE_FAILED = 2;
     // ยกเลิก "ส่งแล้ว" ได้ภายในเวลานี้หลังกดยืนยัน (หน้าจอแสดงปุ่ม "เลิกทำ" 8 วินาที — เผื่อ network)
@@ -77,6 +99,11 @@ public class JobService {
     private final MasterDataService masterDataService;
     private final GoogleRoutesService googleRoutesService;
     private final Clock clock;
+    private final JobAccessService jobAccessService;
+    private final JobDriverRequestService jobDriverRequestService;
+    private final DeliveryJobEventRepository deliveryJobEventRepository;
+    private final UserRepository userRepository;
+    private final TeamNotifier teamNotifier;
 
     @Transactional
     public JobResponse createJob(JobRequest request, String username) {
@@ -131,7 +158,7 @@ public class JobService {
         deliveryRoutingRepository.saveAll(routings);
         orderRepository.saveAll(orders);
 
-        return mapToResponse(savedJob, routings);
+        return mapToResponse(savedJob, routings, username);
     }
 
     @Transactional
@@ -223,11 +250,12 @@ public class JobService {
         job.setTotalOrders(newOrderIds.size());
         job.setScheduledDate(request.getScheduledDate());
         job.setUpdatedBy(username);
-        // เอาจุดที่ยังเปิดอยู่ออกหมด → งานจบเลย เหมือนตอนส่ง/ข้ามจุดสุดท้าย
-        closeJobIfNoOpenStops(job, finalRoutings, username);
+        record(jobId, null, JobEventType.JOB_EDITED, null, null, username);
+        // เหลือแต่จุดที่ส่งแล้ว / ยกเลิกแล้ว → งานจบเลย เหมือนตอนส่งจุดสุดท้าย
+        finishIfAllDone(job, finalRoutings, username);
         DeliveryJob savedJob = deliveryJobRepository.save(job);
 
-        return mapToResponse(savedJob, finalRoutings);
+        return mapToResponse(savedJob, finalRoutings, username);
     }
 
     @Transactional
@@ -249,6 +277,9 @@ public class JobService {
         job.setStatus("I");
         job.setUpdatedBy(username);
         deliveryJobRepository.save(job);
+        // คนส่งของงานนี้จะไม่เห็นงานแล้ว และคำขอที่รอตอบถูกยกเลิก (design assignConfirm G4) — แจ้งให้รู้
+        jobAccessService.notifyUnassigned(job, job.getAssignedDriverId());
+        jobDriverRequestService.cancelPending(job, username);
     }
 
     /**
@@ -259,6 +290,7 @@ public class JobService {
         return username != null && username.equals(createdBy);
     }
 
+    /** A job the caller may manage (edit, delete, assign a driver): the owner only. */
     private DeliveryJob findActiveJob(Long jobId, String username) {
         DeliveryJob job = deliveryJobRepository.findById(jobId)
                 .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
@@ -268,18 +300,55 @@ public class JobService {
         return job;
     }
 
+    /**
+     * A job the caller may operate (start, stop actions, close): the owner, or the assigned driver while still an
+     * ACTIVE member of the owner's team. Anyone else gets the same "not found" as a missing job.
+     */
+    private DeliveryJob findOperableJob(Long jobId, String username) {
+        DeliveryJob job = deliveryJobRepository.findById(jobId)
+                .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
+        if (!"A".equals(job.getStatus()) || !canOperate(job, username)) {
+            throw new IllegalArgumentException("Job not found: " + jobId);
+        }
+        return job;
+    }
+
+    private boolean canOperate(DeliveryJob job, String username) {
+        return isOwner(job.getCreatedBy(), username) || jobAccessService.isAssignedActiveDriver(job, username);
+    }
+
+    /**
+     * เลือก / เปลี่ยน / ปลด คนส่งของงาน ({@code driverUserId = null} = ปลด) — เจ้าของงานเท่านั้น
+     * เลือกคน = ส่งคำขอให้คนส่งตอบรับก่อน ไม่ได้งานทันที (design assignConfirm) — กฎอยู่ใน
+     * {@link JobDriverRequestService#requestDriver} · ล็อกแถวงานก่อน ให้การเลือกกับการตอบรับของคนส่งทำทีละรายการ
+     */
+    @Transactional
+    public JobResponse assignDriver(Long jobId, Integer driverUserId, String username) {
+        DeliveryJob job = deliveryJobRepository.findForUpdate(jobId)
+                .filter(j -> "A".equals(j.getStatus()) && isOwner(j.getCreatedBy(), username))
+                .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
+        List<DeliveryRouting> routings = deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(jobId);
+        int stopCount = (int) routings.stream().filter(r -> !"CANCELLED".equalsIgnoreCase(r.getRoutingStatus())).count();
+        jobDriverRequestService.requestDriver(job, driverUserId, username, stopCount);
+        return mapToResponse(job, routings, username);
+    }
+
     @Transactional
     public JobResponse completeStop(Long jobId, Long orderId, String username) {
+        return completeStop(jobId, orderId, null, username);
+    }
+
+    /** {@code location} = phone position when pressed (optional, kept in the history — driver-risk ข้อ 17, 18). */
+    @Transactional
+    public JobResponse completeStop(Long jobId, Long orderId, GeoPoint location, String username) {
         DeliveryRouting routing = findStopOfOpenJob(jobId, orderId, username);
-        if ("CANCELLED".equalsIgnoreCase(routing.getRoutingStatus())) {
+        if (STOP_CANCELLED.equalsIgnoreCase(routing.getRoutingStatus())) {
             throw new IllegalArgumentException("Stop for order " + orderId + " is already " + routing.getRoutingStatus());
         }
         startIfNotStarted(routing.getDeliveryJob(), username);
 
-        // จุดที่ข้ามไว้ (SKIPPED) กลับมายืนยันส่งได้ ตราบใดที่งานยังไม่จบ
-        routing.setRoutingStatus("COMPLETED");
-        routing.setUpdatedBy(username);
-        deliveryRoutingRepository.save(routing);
+        // จุดที่ข้ามไว้ (SKIPPED) / แจ้งยกเลิกไว้ (ลูกค้าเปลี่ยนใจอีกที) กลับมายืนยันส่งได้ ตราบใดที่งานยังไม่จบ
+        setStopStatus(routing, STOP_COMPLETED, null, null, username);
 
         Order order = routing.getOrder();
         order.setOrderStatus(OrderStatus.COMPLETED);
@@ -287,23 +356,27 @@ public class JobService {
         order.setUpdatedBy(username);
         orderRepository.save(order);
 
-        return completeJobIfNoOpenStops(routing.getDeliveryJob(), username);
+        recordAt(jobId, routing.getOrder(), JobEventType.STOP_COMPLETED, null, null, location, username);
+        return finishJobIfAllDone(routing.getDeliveryJob(), username);
     }
 
+    /**
+     * ข้ามจุด — ต้องเลือกเหตุผล ({@link StopReason#SKIP_LABELS}) · order ยังอยู่ในงานนี้ (IN_TRANSIT) จนงานปิด
+     * งานไม่ปิดเองเพราะการข้าม (risk ข้อ 3) — ถ้าไม่เหลือจุดค้าง คนส่งกลับไปส่งจุดที่ข้าม หรือกด "ปิดงาน" เอง
+     */
     @Transactional
-    public JobResponse skipStop(Long jobId, Long orderId, String username) {
+    public JobResponse skipStop(Long jobId, Long orderId, StopActionRequest body, String username) {
+        Reason reason = requireReason(body, StopReason.SKIP_LABELS);
         DeliveryRouting routing = findStopOfOpenJob(jobId, orderId, username);
-        if (CLOSED_STOP_STATUSES.contains(upper(routing.getRoutingStatus()))) {
+        if (!isOpen(routing)) {
             throw new IllegalArgumentException("Stop for order " + orderId + " is already " + routing.getRoutingStatus());
         }
         startIfNotStarted(routing.getDeliveryJob(), username);
 
-        // order ยังอยู่ในงานนี้ (IN_TRANSIT) — จะคืนเป็น PENDING ตอนงานจบเท่านั้น
-        routing.setRoutingStatus("SKIPPED");
-        routing.setUpdatedBy(username);
-        deliveryRoutingRepository.save(routing);
-
-        return completeJobIfNoOpenStops(routing.getDeliveryJob(), username);
+        setStopStatus(routing, STOP_SKIPPED, reason.code(), reason.note(), username);
+        recordAt(jobId, routing.getOrder(), JobEventType.STOP_SKIPPED, reason.code(), reason.note(), body.getLocation(),
+                username);
+        return finishJobIfAllDone(routing.getDeliveryJob(), username);
     }
 
     /**
@@ -314,7 +387,7 @@ public class JobService {
     @Transactional
     public JobResponse reopenStop(Long jobId, Long orderId, String username) {
         DeliveryRouting routing = findStopOfOpenJob(jobId, orderId, username);
-        if (!"COMPLETED".equalsIgnoreCase(routing.getRoutingStatus())) {
+        if (!STOP_COMPLETED.equalsIgnoreCase(routing.getRoutingStatus())) {
             throw new IllegalArgumentException("Stop for order " + orderId + " is not completed");
         }
         Order order = routing.getOrder();
@@ -323,49 +396,79 @@ public class JobService {
             throw new IllegalArgumentException("Stop for order " + orderId + " can no longer be undone");
         }
 
-        routing.setRoutingStatus("NEW");
-        routing.setUpdatedBy(username);
-        deliveryRoutingRepository.save(routing);
+        setStopStatus(routing, "NEW", null, null, username);
 
         order.setOrderStatus(OrderStatus.IN_TRANSIT);
         order.setDeliveryDate(null);
         order.setUpdatedBy(username);
         orderRepository.save(order);
 
-        return completeJobIfNoOpenStops(routing.getDeliveryJob(), username);
+        record(jobId, orderId, JobEventType.STOP_UNDONE, null, null, username);
+        return finishJobIfAllDone(routing.getDeliveryJob(), username);
     }
 
     /**
-     * ยกเลิกจุดส่ง — ลูกค้ายกเลิกระหว่างที่ order อยู่ในงาน: ทั้งจุดและ order เป็น CANCELLED
-     * จุดที่ยกเลิกนับเป็นจุดที่ปิดแล้ว ถ้าไม่เหลือจุดค้าง งานจบเลย
+     * ลูกค้ายกเลิก — ต้องเลือกเหตุผล ({@link StopReason#CANCEL_LABELS})
+     * <ul>
+     *   <li>เจ้าของกด → ยกเลิกทันที: จุดและ order เป็น CANCELLED · ถ้าทุกจุดส่งแล้ว/ยกเลิกแล้ว งานปิด</li>
+     *   <li>คนส่งกด → แค่ "แจ้งยกเลิก" (CANCEL_REQUESTED) order ไม่เปลี่ยน รอเจ้าของอนุมัติ (risk ข้อ 2, 11)</li>
+     * </ul>
      */
     @Transactional
-    public JobResponse cancelStop(Long jobId, Long orderId, String username) {
+    public JobResponse cancelStop(Long jobId, Long orderId, StopActionRequest body, String username) {
+        Reason reason = requireReason(body, StopReason.CANCEL_LABELS);
         DeliveryRouting routing = findStopOfOpenJob(jobId, orderId, username);
-        if (FINAL_STOP_STATUSES.contains(upper(routing.getRoutingStatus()))) {
+        String status = upper(routing.getRoutingStatus());
+        if (!isOpen(routing) && !STOP_SKIPPED.equals(status)) {
             throw new IllegalArgumentException("Stop for order " + orderId + " is already " + routing.getRoutingStatus());
         }
-        startIfNotStarted(routing.getDeliveryJob(), username);
+        DeliveryJob job = routing.getDeliveryJob();
+        startIfNotStarted(job, username);
 
-        routing.setRoutingStatus("CANCELLED");
-        routing.setUpdatedBy(username);
-        deliveryRoutingRepository.save(routing);
+        if (isOwner(job.getCreatedBy(), username)) {
+            cancelOrderOfStop(routing, reason.code(), reason.note(), username);
+            recordAt(jobId, routing.getOrder(), JobEventType.STOP_CANCELLED, reason.code(), reason.note(),
+                    body.getLocation(), username);
+            return finishJobIfAllDone(job, username);
+        }
 
-        Order order = routing.getOrder();
-        order.setOrderStatus(OrderStatus.CANCELLED);
-        order.setUpdatedBy(username);
-        orderRepository.save(order);
+        setStopStatus(routing, STOP_CANCEL_REQUESTED, reason.code(), reason.note(), username);
+        recordAt(jobId, routing.getOrder(), JobEventType.STOP_CANCEL_REQUESTED, reason.code(), reason.note(),
+                body.getLocation(), username);
+        User owner = userRepository.findByUsername(job.getCreatedBy()).orElse(null);
+        User driver = userRepository.findByUsername(username).orElse(null);
+        teamNotifier.stopCancelRequested(job, owner, driver, customerName(routing.getOrder()),
+                StopReason.text(reason.code(), reason.note()));
+        return finishJobIfAllDone(job, username);
+    }
 
-        return completeJobIfNoOpenStops(routing.getDeliveryJob(), username);
+    /** เจ้าของอนุมัติที่คนส่งแจ้งยกเลิก → จุดและ order เป็น CANCELLED (เหตุผลเดิมของคนส่งยังอยู่) */
+    @Transactional
+    public JobResponse approveCancel(Long jobId, Long orderId, String username) {
+        DeliveryRouting routing = findCancelRequestOfOwner(jobId, orderId, username);
+        cancelOrderOfStop(routing, routing.getStatusReason(), routing.getStatusNote(), username);
+        record(jobId, orderId, JobEventType.STOP_CANCEL_APPROVED, null, null, username);
+        notifyDriverOfCancelAnswer(routing, true);
+        return finishJobIfAllDone(routing.getDeliveryJob(), username);
+    }
+
+    /** เจ้าของไม่อนุมัติ → จุดกลับเป็นรอจัดส่ง คนส่งต้องไปส่งต่อ (หรือข้าม) */
+    @Transactional
+    public JobResponse rejectCancel(Long jobId, Long orderId, String username) {
+        DeliveryRouting routing = findCancelRequestOfOwner(jobId, orderId, username);
+        setStopStatus(routing, "NEW", null, null, username);
+        record(jobId, orderId, JobEventType.STOP_CANCEL_REJECTED, null, null, username);
+        notifyDriverOfCancelAnswer(routing, false);
+        return finishJobIfAllDone(routing.getDeliveryJob(), username);
     }
 
     /**
-     * ปิดงานเอง (เช่น จบวันแล้วยังส่งไม่ครบ) — จุดที่ยังค้างทั้งหมดถูกบันทึกว่าข้าม
-     * แล้วใช้กฎปิดงานเดิม: order ของจุดที่ข้ามคืนเป็น PENDING
+     * ปิดงานเอง (เช่น จบวันแล้วยังส่งไม่ครบ) — จุดที่ยังค้างถูกบันทึกว่าข้าม (เหตุผล "ปิดงานก่อนไปส่ง")
+     * จุดที่แจ้งยกเลิกแต่เจ้าของยังไม่อนุมัติ ก็นับเป็นข้าม แล้วใช้กฎปิดงานเดิม: order ของจุดที่ข้ามคืนเป็น PENDING
      */
     @Transactional
     public JobResponse closeJob(Long jobId, String username) {
-        DeliveryJob job = findActiveJob(jobId, username);
+        DeliveryJob job = findOperableJob(jobId, username);
         if ("COMPLETED".equalsIgnoreCase(job.getDeliveryStatus())) {
             throw new IllegalArgumentException("Job " + jobId + " is already completed");
         }
@@ -375,18 +478,28 @@ public class JobService {
         }
 
         List<DeliveryRouting> routings = deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(jobId);
-        List<DeliveryRouting> openStops = routings.stream()
-                .filter(r -> !CLOSED_STOP_STATUSES.contains(upper(r.getRoutingStatus())))
-                .toList();
-        for (DeliveryRouting routing : openStops) {
-            routing.setRoutingStatus("SKIPPED");
+        List<DeliveryRouting> changed = new ArrayList<>();
+        for (DeliveryRouting routing : routings) {
+            if (isOpen(routing)) {
+                routing.setRoutingStatus(STOP_SKIPPED);
+                routing.setStatusReason(StopReason.JOB_CLOSED);
+                routing.setStatusNote(null);
+            } else if (STOP_CANCEL_REQUESTED.equalsIgnoreCase(routing.getRoutingStatus())) {
+                routing.setRoutingStatus(STOP_SKIPPED);
+                routing.setStatusReason(StopReason.CANCEL_NOT_APPROVED);
+                routing.setStatusNote(null);
+            } else {
+                continue;
+            }
             routing.setUpdatedBy(username);
+            changed.add(routing);
         }
-        deliveryRoutingRepository.saveAll(openStops);
+        deliveryRoutingRepository.saveAll(changed);
 
-        closeJobIfNoOpenStops(job, routings, username);
+        closeAndReleaseSkipped(job, routings, username);
         deliveryJobRepository.save(job);
-        return mapToResponse(job, routings);
+        record(jobId, null, JobEventType.JOB_CLOSED, null, null, username);
+        return mapToResponse(job, routings, username);
     }
 
     /**
@@ -394,7 +507,7 @@ public class JobService {
      */
     @Transactional
     public JobResponse startJob(Long jobId, String username) {
-        DeliveryJob job = findActiveJob(jobId, username);
+        DeliveryJob job = findOperableJob(jobId, username);
         if ("COMPLETED".equalsIgnoreCase(job.getDeliveryStatus())) {
             throw new IllegalArgumentException("Job " + jobId + " is already completed");
         }
@@ -403,7 +516,46 @@ public class JobService {
         }
         startIfNotStarted(job, username);
         deliveryJobRepository.save(job);
-        return mapToResponse(job, deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(jobId));
+        return mapToResponse(job, deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(jobId), username);
+    }
+
+    /** ประวัติของงาน ใหม่สุดก่อน — เจ้าของและคนส่งที่ได้รับงานเห็นเหมือนกัน (risk ข้อ 18) */
+    @Transactional(readOnly = true)
+    public List<JobEventResponse> listEvents(Long jobId, String username) {
+        DeliveryJob job = findOperableJob(jobId, username);
+        List<DeliveryJobEvent> events = deliveryJobEventRepository.findByJobIdOrderByEventIdDesc(jobId);
+        if (events.isEmpty()) {
+            return List.of();
+        }
+        Map<String, User> actors = userRepository.findByUsernameIn(
+                        events.stream().map(DeliveryJobEvent::getActorUsername).collect(Collectors.toSet()))
+                .stream().collect(Collectors.toMap(User::getUsername, Function.identity()));
+        Set<Long> orderIds = events.stream().map(DeliveryJobEvent::getOrderId).filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        Map<Long, String> customers = new HashMap<>();
+        if (!orderIds.isEmpty()) {
+            orderRepository.findAllById(orderIds).forEach(o -> customers.put(o.getOrderId(), customerName(o)));
+        }
+        return events.stream()
+                .map(e -> JobEventResponse.builder()
+                        .eventId(e.getEventId())
+                        .eventType(e.getEventType())
+                        .orderId(e.getOrderId())
+                        .customerName(e.getOrderId() == null ? null : customers.get(e.getOrderId()))
+                        .reason(e.getReason())
+                        .reasonText(StopReason.text(e.getReason(), e.getNote()))
+                        .actor(actors.containsKey(e.getActorUsername())
+                                ? TeamService.toSummary(actors.get(e.getActorUsername()))
+                                : TeamUserSummary.builder().username(e.getActorUsername())
+                                        .displayName(e.getActorUsername()).build())
+                        .byOwner(isOwner(job.getCreatedBy(), e.getActorUsername()))
+                        .createdAt(e.getCreatedAt())
+                        .lat(e.getLat())
+                        .lng(e.getLng())
+                        .accuracyM(e.getAccuracyM())
+                        .distanceKm(e.getDistanceKm())
+                        .build())
+                .toList();
     }
 
     /**
@@ -417,6 +569,9 @@ public class JobService {
         job.setDeliveryStatus(JobStatus.IN_PROGRESS);
         job.setUpdatedBy(username);
         deliveryJobRepository.save(job);
+        record(job.getJobId(), null, JobEventType.JOB_STARTED, null, null, username);
+        // เจ้าของเริ่มเองระหว่างรอคนส่งตอบ = ส่งเอง → คำขอถูกยกเลิก (G4) · มีคนส่งรับแล้วจะไม่มีคำขอค้าง
+        jobDriverRequestService.cancelPending(job, username);
         for (DeliveryRouting r : deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(job.getJobId())) {
             Order order = r.getOrder();
             if (OrderStatus.ASSIGNED.equals(order.getOrderStatus())) {
@@ -429,7 +584,7 @@ public class JobService {
 
     private DeliveryRouting findStopOfOpenJob(Long jobId, Long orderId, String username) {
         DeliveryRouting routing = deliveryRoutingRepository.findByDeliveryJobJobIdAndOrderOrderId(jobId, orderId)
-                .filter(r -> isOwner(r.getDeliveryJob().getCreatedBy(), username))
+                .filter(r -> canOperate(r.getDeliveryJob(), username))
                 .orElseThrow(() -> new IllegalArgumentException(
                         "Delivery stop not found for job " + jobId + " and order " + orderId));
         DeliveryJob job = routing.getDeliveryJob();
@@ -443,27 +598,153 @@ public class JobService {
         return routing;
     }
 
-    private JobResponse completeJobIfNoOpenStops(DeliveryJob job, String username) {
-        List<DeliveryRouting> allRoutings = deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(job.getJobId());
-        if (closeJobIfNoOpenStops(job, allRoutings, username)) {
-            deliveryJobRepository.save(job);
+    /** จุดที่คนส่งแจ้งยกเลิกไว้ ในงานที่ยังเปิดของเจ้าของ — คนอื่นได้ "not found" เหมือนไม่มีจุดนี้ */
+    private DeliveryRouting findCancelRequestOfOwner(Long jobId, Long orderId, String username) {
+        DeliveryRouting routing = findStopOfOpenJob(jobId, orderId, username);
+        if (!isOwner(routing.getDeliveryJob().getCreatedBy(), username)) {
+            throw new IllegalArgumentException("Delivery stop not found for job " + jobId + " and order " + orderId);
         }
-        return mapToResponse(job, allRoutings);
+        if (!STOP_CANCEL_REQUESTED.equalsIgnoreCase(routing.getRoutingStatus())) {
+            throw new IllegalArgumentException("Stop for order " + orderId + " has no cancel request");
+        }
+        return routing;
+    }
+
+    private void cancelOrderOfStop(DeliveryRouting routing, String reason, String note, String username) {
+        setStopStatus(routing, STOP_CANCELLED, reason, note, username);
+        Order order = routing.getOrder();
+        order.setOrderStatus(OrderStatus.CANCELLED);
+        order.setUpdatedBy(username);
+        orderRepository.save(order);
+    }
+
+    private void notifyDriverOfCancelAnswer(DeliveryRouting routing, boolean approved) {
+        DeliveryJob job = routing.getDeliveryJob();
+        if (job.getAssignedDriverId() == null) {
+            return;
+        }
+        userRepository.findById(job.getAssignedDriverId()).ifPresent(driver ->
+                teamNotifier.stopCancelAnswered(job, driver, customerName(routing.getOrder()), approved));
+    }
+
+    private void setStopStatus(DeliveryRouting routing, String status, String reason, String note, String username) {
+        routing.setRoutingStatus(status);
+        routing.setStatusReason(reason);
+        routing.setStatusNote(note);
+        routing.setUpdatedBy(username);
+        deliveryRoutingRepository.save(routing);
+    }
+
+    private void record(Long jobId, Long orderId, String type, String reason, String note, String username) {
+        deliveryJobEventRepository.save(DeliveryJobEvent.builder()
+                .jobId(jobId)
+                .orderId(orderId)
+                .eventType(type)
+                .reason(reason)
+                .note(note)
+                .actorUsername(username)
+                .createdAt(LocalDateTime.now(clock))
+                .build());
     }
 
     /**
-     * งานจบเมื่อทุกจุด ส่งแล้ว ข้าม หรือยกเลิก — order ของจุดที่ข้ามคืนเป็น PENDING เพื่อจัดเข้างานรอบถัดไปได้
-     * ยกเว้น order ที่ถูกข้ามครบ {@link #MAX_SKIPS_BEFORE_FAILED} ครั้ง (รวมงานนี้) เป็น FAILED
-     * คืน true ถ้างานถูกปิด (ผู้เรียกต้อง save job เอง)
+     * {@link #record} plus where the phone was: an invalid / missing position is stored as unknown. The distance is a
+     * straight line to the centre of the customer's subdistrict (orders have no exact coordinates), so a few km is
+     * normal in rural areas.
      */
-    private boolean closeJobIfNoOpenStops(DeliveryJob job, List<DeliveryRouting> routings, String username) {
-        boolean noOpenStops = routings.stream()
-                .allMatch(r -> CLOSED_STOP_STATUSES.contains(upper(r.getRoutingStatus())));
-        if (!noOpenStops) {
+    private void recordAt(Long jobId, Order order, String type, String reason, String note, GeoPoint location,
+                          String username) {
+        DeliveryJobEvent.DeliveryJobEventBuilder event = DeliveryJobEvent.builder()
+                .jobId(jobId)
+                .orderId(order.getOrderId())
+                .eventType(type)
+                .reason(reason)
+                .note(note)
+                .actorUsername(username)
+                .createdAt(LocalDateTime.now(clock));
+        if (location != null && location.isValid()) {
+            event.lat(BigDecimal.valueOf(location.getLat()).setScale(6, java.math.RoundingMode.HALF_UP))
+                    .lng(BigDecimal.valueOf(location.getLng()).setScale(6, java.math.RoundingMode.HALF_UP))
+                    .accuracyM(location.getAccuracyM() == null || location.getAccuracyM() < 0 ? null
+                            : (int) Math.min(Math.round(location.getAccuracyM()), 1_000_000))
+                    .distanceKm(distanceToCustomerArea(order, location));
+        }
+        deliveryJobEventRepository.save(event.build());
+    }
+
+    private BigDecimal distanceToCustomerArea(Order order, GeoPoint location) {
+        String code = order.getAddress() == null ? null : order.getAddress().getSubdistrictCode();
+        if (code == null) {
+            return null;
+        }
+        return subdistrictRepository.findByCode(code)
+                .map(sub -> GeoDistance.haversineKm(BigDecimal.valueOf(location.getLat()),
+                        BigDecimal.valueOf(location.getLng()), sub.getLat(), sub.getLng()))
+                .orElse(null);
+    }
+
+    private record Reason(String code, String note) {
+    }
+
+    /** เหตุผลต้องอยู่ใน {@code allowed} · "อื่นๆ" ต้องพิมพ์รายละเอียด · รายละเอียดไม่เกิน {@link StopReason#NOTE_MAX} */
+    private static Reason requireReason(StopActionRequest body, Map<String, String> allowed) {
+        String code = body == null || !StringUtils.hasText(body.getReason()) ? null : body.getReason().trim();
+        if (code == null) {
+            throw new IllegalArgumentException("กรุณาเลือกเหตุผล");
+        }
+        if (!allowed.containsKey(code)) {
+            throw new IllegalArgumentException("เหตุผลไม่ถูกต้อง");
+        }
+        String note = body.getNote() == null || body.getNote().isBlank() ? null : body.getNote().trim();
+        if (StopReason.OTHER.equals(code) && note == null) {
+            throw new IllegalArgumentException("กรุณาพิมพ์รายละเอียดของเหตุผล \"อื่นๆ\"");
+        }
+        if (note != null && note.length() > StopReason.NOTE_MAX) {
+            throw new IllegalArgumentException("รายละเอียดยาวเกิน " + StopReason.NOTE_MAX + " ตัวอักษร");
+        }
+        return new Reason(code, note);
+    }
+
+    /** จุดที่ยังต้องไปส่ง — ไม่ใช่ ส่งแล้ว / ข้าม / ยกเลิก / แจ้งยกเลิก */
+    private static boolean isOpen(DeliveryRouting routing) {
+        return !HANDLED_STOP_STATUSES.contains(upper(routing.getRoutingStatus()));
+    }
+
+    private static String customerName(Order order) {
+        return order == null || order.getCustomer() == null ? null : order.getCustomer().getName();
+    }
+
+    private JobResponse finishJobIfAllDone(DeliveryJob job, String username) {
+        List<DeliveryRouting> allRoutings = deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(job.getJobId());
+        if (finishIfAllDone(job, allRoutings, username)) {
+            deliveryJobRepository.save(job);
+        }
+        return mapToResponse(job, allRoutings, username);
+    }
+
+    /**
+     * งานปิดเองเมื่อทุกจุด "ส่งแล้ว" หรือ "ยกเลิก" เท่านั้น — มีจุดที่ข้าม / แจ้งยกเลิกค้างอยู่ งานยังเปิด
+     * ให้คนส่งกลับไปส่ง หรือกด "ปิดงาน" เอง (risk ข้อ 3) · คืน true ถ้างานถูกปิด (ผู้เรียกต้อง save job เอง)
+     */
+    private boolean finishIfAllDone(DeliveryJob job, List<DeliveryRouting> routings, String username) {
+        boolean allDone = !routings.isEmpty() && routings.stream()
+                .allMatch(r -> FINAL_STOP_STATUSES.contains(upper(r.getRoutingStatus())));
+        if (!allDone) {
             return false;
         }
+        closeAndReleaseSkipped(job, routings, username);
+        record(job.getJobId(), null, JobEventType.JOB_FINISHED, null, null, username);
+        return true;
+    }
+
+    /**
+     * ปิดงาน — order ของจุดที่ข้ามคืนเป็น PENDING เพื่อจัดเข้างานรอบถัดไปได้
+     * ยกเว้น order ที่ถูกข้ามครบ {@link #MAX_SKIPS_BEFORE_FAILED} ครั้ง (รวมงานนี้) เป็น FAILED
+     * ผู้เรียกต้อง save job เอง
+     */
+    private void closeAndReleaseSkipped(DeliveryJob job, List<DeliveryRouting> routings, String username) {
         List<DeliveryRouting> skipped = routings.stream()
-                .filter(r -> "SKIPPED".equalsIgnoreCase(r.getRoutingStatus()))
+                .filter(r -> STOP_SKIPPED.equalsIgnoreCase(r.getRoutingStatus()))
                 .toList();
         Map<Long, Long> skipCounts = skipped.isEmpty() ? Map.of() : countSkipsByOrder(skipped, job.getJobId());
         for (DeliveryRouting r : skipped) {
@@ -476,7 +757,6 @@ public class JobService {
         job.setDeliveryStatus("COMPLETED");
         job.setCompletedDate(LocalDateTime.now());
         job.setUpdatedBy(username);
-        return true;
     }
 
     private Map<Long, Long> countSkipsByOrder(List<DeliveryRouting> skipped, Long jobId) {
@@ -494,10 +774,21 @@ public class JobService {
 
     @Transactional(readOnly = true)
     public List<JobResponse> listJobs(String username) {
-        List<DeliveryJob> jobs = deliveryJobRepository.findByStatusAndCreatedByOrderByCreatedAtDesc("A", username);
-        if (jobs.isEmpty()) {
+        // งานที่ฉันสร้าง + งานที่ถูก assign ให้ฉันจากทุกทีมที่ฉันยัง ACTIVE (ทุกสถานะ รวมที่ปิดแล้ว — design §10 Q1)
+        Map<Long, DeliveryJob> byId = new java.util.LinkedHashMap<>();
+        Stream.concat(deliveryJobRepository.findByStatusAndCreatedByOrderByCreatedAtDesc("A", username).stream(),
+                        jobAccessService.findAssignedJobs(username).stream())
+                .forEach(job -> byId.putIfAbsent(job.getJobId(), job));
+        if (byId.isEmpty()) {
             return List.of();
         }
+        List<DeliveryJob> jobs = byId.values().stream()
+                .sorted(Comparator.comparing(DeliveryJob::getCreatedAt,
+                        Comparator.nullsLast(Comparator.reverseOrder())))
+                .toList();
+        Map<Long, JobAccessService.JobPeople> people = jobAccessService.describe(jobs);
+        Map<Long, JobDriverRequestService.JobRequests> requests = jobDriverRequestService.describe(
+                jobs.stream().filter(job -> isOwner(job.getCreatedBy(), username)).toList());
 
         List<Long> jobIds = jobs.stream().map(DeliveryJob::getJobId).toList();
         Map<Long, List<DeliveryRouting>> routingsByJobId = deliveryRoutingRepository.findByDeliveryJobJobIdIn(jobIds)
@@ -505,7 +796,8 @@ public class JobService {
                 .collect(Collectors.groupingBy(r -> r.getDeliveryJob().getJobId()));
 
         return jobs.stream()
-                .map(job -> mapToResponse(job, routingsByJobId.getOrDefault(job.getJobId(), List.of())))
+                .map(job -> mapToResponse(job, routingsByJobId.getOrDefault(job.getJobId(), List.of()), username,
+                        people.get(job.getJobId()), requests.get(job.getJobId())))
                 .toList();
     }
 
@@ -889,6 +1181,7 @@ public class JobService {
                 .customerName(order.getCustomer() != null ? order.getCustomer().getName() : null)
                 .address(mapToAddressResponse(address))
                 .orderStatus(order.getOrderStatus())
+                .appointmentDate(order.getAppointmentDate())
                 .distanceKm(distanceFromOriginKm)
                 .detourKm(detourKm)
                 .build();
@@ -939,24 +1232,72 @@ public class JobService {
         return "JOB-" + datePart + "-" + uniquePart;
     }
 
-    private JobResponse mapToResponse(DeliveryJob job, List<DeliveryRouting> routings) {
+    private JobResponse.RoutingItem toRoutingItem(DeliveryRouting r, boolean showPrice, boolean hideContact) {
+        OrderResponse.OrderAddressResponse address = mapToAddressResponse(r.getOrder().getAddress());
+        if (hideContact && address != null) {
+            address.setAddressLine(null);
+        }
+        return JobResponse.RoutingItem.builder()
+                .orderId(r.getOrder().getOrderId())
+                .orderCode(r.getOrder().getOrderCode())
+                .customerName(r.getOrder().getCustomer() != null ? r.getOrder().getCustomer().getName() : null)
+                .address(address)
+                .sequenceNo(r.getSequenceNo())
+                .routingStatus(r.getRoutingStatus())
+                .statusReason(r.getStatusReason())
+                .statusReasonText(StopReason.text(r.getStatusReason(), r.getStatusNote()))
+                .orderStatus(r.getOrder().getOrderStatus())
+                .tel(hideContact || r.getOrder().getCustomer() == null ? null : r.getOrder().getCustomer().getPhone())
+                .detail(hideContact ? null : r.getOrder().getDetail())
+                .deliveredAt(r.getOrder().getDeliveryDate())
+                .price(showPrice ? r.getOrder().getPrice() : null)
+                .build();
+    }
+
+    private JobResponse mapToResponse(DeliveryJob job, List<DeliveryRouting> routings, String username) {
+        // คำขอรับงาน: เจ้าของเท่านั้นที่เห็น — คนส่งไม่ต้อง query
+        JobDriverRequestService.JobRequests requests = isOwner(job.getCreatedBy(), username)
+                ? jobDriverRequestService.describe(List.of(job)).get(job.getJobId()) : null;
+        return mapToResponse(job, routings, username, jobAccessService.describe(List.of(job)).get(job.getJobId()),
+                requests);
+    }
+
+    /** The driver as shown on the job; only the owner gets the driver's phone, and only while they share a team. */
+    private static TeamUserSummary assignedDriverFor(JobAccessService.JobPeople people, boolean manage) {
+        if (people == null || people.assignedDriver() == null) {
+            return null;
+        }
+        TeamUserSummary driver = people.assignedDriver();
+        return TeamUserSummary.builder()
+                .userId(driver.getUserId())
+                .username(driver.getUsername())
+                .displayName(driver.getDisplayName())
+                .phone(manage && people.sameTeam() ? people.driverPhone() : null)
+                .build();
+    }
+
+    /**
+     * {@code people} may be null (not loaded) — the job is then shown without owner / driver names.
+     * {@code requests} null = no request to show (always null for a driver).
+     */
+    private JobResponse mapToResponse(DeliveryJob job, List<DeliveryRouting> routings, String username,
+                                      JobAccessService.JobPeople people, JobDriverRequestService.JobRequests requests) {
+        boolean manage = isOwner(job.getCreatedBy(), username);
+        // ราคา: เจ้าของเห็นเสมอ · คนส่งเห็นเมื่อเจ้าของเปิด driver.show-price (design §5.3)
+        boolean showPrice = manage || (people != null && people.driverSeesPrice());
         AddressInfoDto origin = masterDataService.getAddressInfoSafe(
                 job.getOriginProvinceCode(), job.getOriginDistrictCode(), job.getOriginSubdistrictCode());
 
+        boolean jobClosed = JobStatus.COMPLETED.equalsIgnoreCase(job.getDeliveryStatus());
         List<JobResponse.RoutingItem> routingItems = routings.stream()
                 .sorted(Comparator.comparing(DeliveryRouting::getSequenceNo))
-                .map(r -> JobResponse.RoutingItem.builder()
-                        .orderId(r.getOrder().getOrderId())
-                        .orderCode(r.getOrder().getOrderCode())
-                        .customerName(r.getOrder().getCustomer() != null ? r.getOrder().getCustomer().getName() : null)
-                        .address(mapToAddressResponse(r.getOrder().getAddress()))
-                        .sequenceNo(r.getSequenceNo())
-                        .routingStatus(r.getRoutingStatus())
-                        .orderStatus(r.getOrder().getOrderStatus())
-                        .tel(r.getOrder().getCustomer() != null ? r.getOrder().getCustomer().getPhone() : null)
-                        .detail(r.getOrder().getDetail())
-                        .deliveredAt(r.getOrder().getDeliveryDate())
-                        .build())
+                .map(r -> {
+                    // คนส่ง: จุดที่ส่งแล้ว / ยกเลิกแล้ว หรืองานปิดแล้ว ไม่ต้องติดต่อลูกค้าอีก → ไม่ส่งเบอร์ บ้านเลขที่
+                    // และรายละเอียดสินค้า (driver-risk ข้อ 13 — กันจดไว้ติดต่อลูกค้าเอง) · ชื่อ + ตำบลยังเห็นเพื่ออ้างอิง
+                    boolean hideContact = !manage
+                            && (jobClosed || FINAL_STOP_STATUSES.contains(upper(r.getRoutingStatus())));
+                    return toRoutingItem(r, showPrice, hideContact);
+                })
                 .toList();
 
         return JobResponse.builder()
@@ -968,6 +1309,14 @@ public class JobService {
                 .deliveryStatus(job.getDeliveryStatus())
                 .scheduledDate(job.getScheduledDate())
                 .createdAt(job.getCreatedAt())
+                .ownerUsername(job.getCreatedBy())
+                .ownerDisplayName(people != null && people.owner() != null ? people.owner().getDisplayName() : null)
+                .assignedDriver(assignedDriverFor(people, manage))
+                .ownerPhone(!manage && people != null && people.sameTeam() ? people.ownerPhone() : null)
+                .myAccess(manage ? JobAccess.MANAGE : JobAccess.OPERATE)
+                .driverRequest(manage && requests != null ? requests.pending() : null)
+                .lastDeclined(manage && requests != null ? requests.lastDeclined() : null)
+                .declinedDriverIds(manage && requests != null ? requests.declinedDriverIds() : null)
                 .routings(routingItems)
                 .build();
     }

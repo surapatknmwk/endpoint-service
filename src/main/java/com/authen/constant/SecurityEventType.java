@@ -24,7 +24,11 @@ public enum SecurityEventType {
     LOGIN_FAILED(Severity.MEDIUM, 1),
 
     /** A valid token called an endpoint its role has no permission for. */
-    PERMISSION_DENIED(Severity.MEDIUM, 1);
+    PERMISSION_DENIED(Severity.MEDIUM, 1),
+    /** LINE Login failed: bad / expired state, LINE rejected the code or ID token, disabled account. */
+    LINE_LOGIN_FAILED(Severity.MEDIUM, 1),
+    /** One client IP created more accounts per hour than registration.max-per-ip-per-hour. */
+    REGISTER_BLOCKED(Severity.HIGH, 1);
 
     public enum Severity { LOW, MEDIUM, HIGH }
 

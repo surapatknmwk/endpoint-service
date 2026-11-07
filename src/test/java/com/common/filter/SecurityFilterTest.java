@@ -96,7 +96,7 @@ class SecurityFilterTest {
     }
 
     @Test
-    void should_respond401WithoutCallingChain_when_masterPermissionDenied() throws Exception {
+    void should_respond403WithoutCallingChain_when_masterPermissionDenied() throws Exception {
         //GIVEN
         MockHttpServletRequest request = request("GET", "/endpoint-master-service/api/provinces/1", MASTER_PATTERN, AUTH_HEADER);
         MockHttpServletResponse response = new MockHttpServletResponse();
@@ -110,7 +110,7 @@ class SecurityFilterTest {
 
         //THEN
         assertThat(chain.getRequest()).isNull();
-        assertThat(response.getStatus()).isEqualTo(401);
+        assertThat(response.getStatus()).isEqualTo(403);
         assertThat(response.getContentAsString()).contains("Access denied.");
         verify(securityEventRecorder).record(SecurityEventType.PERMISSION_DENIED, request, "admin", "Access denied.");
     }
@@ -133,7 +133,7 @@ class SecurityFilterTest {
     }
 
     @Test
-    void should_respond401WithoutCallingChain_when_searchPermissionDenied() throws Exception {
+    void should_respond403WithoutCallingChain_when_searchPermissionDenied() throws Exception {
         //GIVEN
         MockHttpServletRequest request = request("POST", "/endpoint-search-service/api/search/orders", SEARCH_PATTERN, AUTH_HEADER);
         MockHttpServletResponse response = new MockHttpServletResponse();
@@ -146,7 +146,7 @@ class SecurityFilterTest {
 
         //THEN
         assertThat(chain.getRequest()).isNull();
-        assertThat(response.getStatus()).isEqualTo(401);
+        assertThat(response.getStatus()).isEqualTo(403);
         assertThat(request.getAttribute("currentUserId")).isNull();
     }
 
@@ -184,6 +184,26 @@ class SecurityFilterTest {
     }
 
     @Test
+    void should_respond401WithSessionReplacedCode_when_sessionEndedByLoginOnAnotherDevice() throws Exception {
+        //GIVEN
+        MockHttpServletRequest request = request("GET", "/endpoint-master-service/api/provinces/1", MASTER_PATTERN, AUTH_HEADER);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+        when(authenticationService.validateToken(TOKEN)).thenReturn(false);
+        when(authenticationService.isSessionReplaced(TOKEN)).thenReturn(true);
+
+        //WHEN
+        filter.doFilter(request, response, chain);
+
+        //THEN - the webapp shows "logged in on another device" when it sees this code
+        assertThat(chain.getRequest()).isNull();
+        assertThat(response.getStatus()).isEqualTo(401);
+        assertThat(response.getContentAsString(java.nio.charset.StandardCharsets.UTF_8))
+                .contains("\"code\":\"SESSION_REPLACED\"");
+        verifyNoInteractions(securityService);
+    }
+
+    @Test
     void should_continueWithoutAnyCheck_when_filterIsDisabled() throws Exception {
         //GIVEN
         ReflectionTestUtils.setField(filter, "filterEnabled", false);
@@ -196,6 +216,42 @@ class SecurityFilterTest {
         //THEN
         assertThat(chain.getRequest()).isNotNull();
         verifyNoInteractions(authenticationService, securityService);
+    }
+
+    @Test
+    void should_respond401WithSessionReplacedCode_when_filterDisabledButSessionReplaced() throws Exception {
+        //GIVEN - default profile (filter off), the account logged in on another device
+        ReflectionTestUtils.setField(filter, "filterEnabled", false);
+        MockHttpServletRequest request = request("GET", "/endpoint-master-service/api/provinces/1", MASTER_PATTERN, AUTH_HEADER);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+        when(authenticationService.isSessionReplaced(TOKEN)).thenReturn(true);
+
+        //WHEN
+        filter.doFilter(request, response, chain);
+
+        //THEN - one session per account holds in every profile
+        assertThat(chain.getRequest()).isNull();
+        assertThat(response.getStatus()).isEqualTo(401);
+        assertThat(response.getContentAsString(java.nio.charset.StandardCharsets.UTF_8))
+                .contains("\"code\":\"SESSION_REPLACED\"");
+        verifyNoInteractions(securityService);
+    }
+
+    @Test
+    void should_continueWithoutPermissionCheck_when_filterDisabledAndSessionActive() throws Exception {
+        //GIVEN
+        ReflectionTestUtils.setField(filter, "filterEnabled", false);
+        MockHttpServletRequest request = request("GET", "/endpoint-master-service/api/provinces/1", MASTER_PATTERN, AUTH_HEADER);
+        MockFilterChain chain = new MockFilterChain();
+        when(authenticationService.isSessionReplaced(TOKEN)).thenReturn(false);
+
+        //WHEN
+        filter.doFilter(request, new MockHttpServletResponse(), chain);
+
+        //THEN
+        assertThat(chain.getRequest()).isNotNull();
+        verifyNoInteractions(securityService);
     }
 
     @Test

@@ -13,6 +13,7 @@ import com.authen.util.AesPasswordEncoder;
 import com.authen.util.JwtUtil;
 import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.BeforeEach;
+import org.springframework.context.ApplicationEventPublisher;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -51,6 +52,8 @@ class AuthenticationServiceLoginTest {
     private HttpServletRequest httpRequest;
     @Mock
     private SecurityEventRecorder securityEventRecorder;
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
 
     private final AesPasswordEncoder passwordEncoder =
             new AesPasswordEncoder(Base64.getEncoder().encodeToString(new byte[32]));
@@ -61,7 +64,7 @@ class AuthenticationServiceLoginTest {
     void setUp() {
         service = new AuthenticationService(
                 userRepository, userSessionRepository, permissionRepository, passwordEncoder, jwtUtil,
-                securityEventRecorder);
+                securityEventRecorder, eventPublisher);
         ReflectionTestUtils.setField(service, "jwtExpiration", 3_600_000L);
     }
 

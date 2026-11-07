@@ -31,7 +31,7 @@ import java.util.stream.Collectors;
 public class CorsAllowlistFilter extends OncePerRequestFilter {
 
     private static final String ALLOWED_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
-    private static final String ALLOWED_HEADERS = "Authorization, Content-Type";
+    private static final String ALLOWED_HEADERS = "Authorization, Content-Type, X-Device-Id";
     private static final String MAX_AGE_SECONDS = "3600";
 
     private final Set<String> allowedOrigins;

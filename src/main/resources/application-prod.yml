@@ -50,6 +50,7 @@ spring:
 jwt:
   secret: ${JWT_SECRET}
   expiration: ${JWT_EXPIRATION:3600000}
+  session-max-age-days: ${JWT_SESSION_MAX_AGE_DAYS:7}
 
 password:
   encryption:

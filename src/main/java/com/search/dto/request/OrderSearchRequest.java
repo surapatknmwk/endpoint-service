@@ -34,6 +34,10 @@ public class OrderSearchRequest {
     @Schema(description = "Order status to filter orders", example = "PENDING")
     private String orderStatus;
 
+    @Schema(description = "true = only orders not on a job yet (NEW / PENDING) whose appointment date is today "
+            + "to 7 days ahead (the \"ใกล้ถึงวันนัดส่ง\" reminder)", example = "false")
+    private Boolean dueSoon;
+
     @Schema(description = "Page number (0-based)", example = "0")
     @Builder.Default
     private Integer page = 0;

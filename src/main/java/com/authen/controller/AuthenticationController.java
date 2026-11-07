@@ -12,10 +12,13 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import com.common.dto.ApiResponse;
+import com.common.exception.SessionReplacedException;
+import com.master.service.FeatureFlagService;
 import com.authen.dto.CheckPermissionRequest;
 import com.authen.dto.LoginRequest;
 import com.authen.dto.LoginResponse;
@@ -28,7 +31,10 @@ import com.authen.service.AuthenticationService;
 @Tag(name = "Authentication", description = "Authentication management APIs")
 public class AuthenticationController {
 
+    static final String MSG_LOGIN_DISABLED = "ปิดการเข้าสู่ระบบด้วยชื่อผู้ใช้และรหัสผ่านชั่วคราว";
+
     private final AuthenticationService authenticationService;
+    private final FeatureFlagService featureFlags;
 
     @Operation(
             summary = "User login",
@@ -49,6 +55,11 @@ public class AuthenticationController {
     public ResponseEntity<ApiResponse<LoginResponse>> login(
             @Valid @RequestBody LoginRequest request,
             HttpServletRequest httpRequest) {
+        // feature flag FF_LOGIN (configuration table) — off = password log-in closed; LINE log-in has its own flag
+        if (!featureFlags.isEnabled(FeatureFlagService.LOGIN)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(ApiResponse.error(MSG_LOGIN_DISABLED));
+        }
         try {
             LoginResponse response = authenticationService.login(request, httpRequest);
             return ResponseEntity.ok(ApiResponse.success(response, "Login successful"));
@@ -181,6 +192,10 @@ public class AuthenticationController {
             String token = authHeader.replace("Bearer ", "");
             LoginResponse response = authenticationService.refreshToken(token, httpRequest);
             return ResponseEntity.ok(ApiResponse.success(response, "Token refreshed successfully"));
+        } catch (SessionReplacedException e) {
+            // logged in on another device → webapp shows a popup, then goes to /login
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ApiResponse.errorWithCode(
+                    HttpStatus.UNAUTHORIZED.value(), SessionReplacedException.CODE, e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.badRequest()
                     .body(ApiResponse.error(e.getMessage()));

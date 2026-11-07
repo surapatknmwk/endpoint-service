@@ -1,16 +1,24 @@
 package com.core.controller;
 
 import com.common.dto.ApiResponse;
+import com.core.dto.AssignDriverRequest;
 import com.core.dto.CandidateOrderResponse;
+import com.core.dto.DeclineRequest;
+import com.core.dto.DriverRequestResponse;
+import com.core.dto.GeoPoint;
+import com.core.dto.JobEventResponse;
 import com.core.dto.JobRequest;
+import com.core.dto.StopActionRequest;
 import com.core.dto.JobResponse;
 import com.core.dto.RoutePreviewRequest;
 import com.core.dto.RoutePreviewResponse;
 import com.core.service.JobService;
+import com.core.service.team.JobDriverRequestService;
 import com.core.service.security.SecurityService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -25,6 +33,7 @@ import java.util.List;
 public class JobController {
 
     private final JobService jobService;
+    private final JobDriverRequestService jobDriverRequestService;
     private final SecurityService securityService;
 
     @Operation(summary = "List jobs", description = "Lists active delivery jobs, newest first, each with its ordered delivery stops")
@@ -108,24 +117,42 @@ public class JobController {
     public ResponseEntity<ApiResponse<JobResponse>> completeStop(
             @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
             @PathVariable Long jobId,
-            @PathVariable Long orderId) {
+            @PathVariable Long orderId,
+            @RequestBody(required = false) GeoPoint location) {
         String username = securityService.extractUsernameFromToken(authHeader);
-        JobResponse data = jobService.completeStop(jobId, orderId, username);
+        JobResponse data = jobService.completeStop(jobId, orderId, location, username);
         return ResponseEntity.ok(ApiResponse.success(data, "Stop marked as completed"));
     }
 
     @Operation(summary = "Skip a delivery stop",
-            description = "Marks the given order's stop within the job as skipped. A skipped stop can still be completed "
-                    + "while the job is open. Once every stop is completed or skipped, the job is marked completed and "
-                    + "skipped orders are returned to PENDING so they can be picked into a new job.")
+            description = "Marks the given order's stop within the job as skipped, with a required reason (OTHER needs "
+                    + "a note). A skipped stop can still be completed while the job is open. Skipping never closes the "
+                    + "job: once no stop is left to deliver, the driver goes back to a skipped stop or closes the job.")
     @PatchMapping("/{jobId}/stops/{orderId}/skip")
     public ResponseEntity<ApiResponse<JobResponse>> skipStop(
             @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
             @PathVariable Long jobId,
-            @PathVariable Long orderId) {
+            @PathVariable Long orderId,
+            @Valid @RequestBody(required = false) StopActionRequest request) {
         String username = securityService.extractUsernameFromToken(authHeader);
-        JobResponse data = jobService.skipStop(jobId, orderId, username);
+        JobResponse data = jobService.skipStop(jobId, orderId, request, username);
         return ResponseEntity.ok(ApiResponse.success(data, "Stop skipped"));
+    }
+
+    @Operation(summary = "Ask a driver to take a job, or unassign",
+            description = "Owner only. driverUserId must be an ACTIVE member of the caller's team: the driver is asked "
+                    + "(a PENDING request) and gets the job only after accepting; a driver who had accepted is "
+                    + "unassigned and a pending request to someone else is cancelled. null unassigns and cancels. "
+                    + "Only while the job is NEW. The accepted or already-asked driver again changes nothing. The "
+                    + "{jobId} name is part of the permission row in db/permissions-team-data.sql.")
+    @PatchMapping("/{jobId}/driver")
+    public ResponseEntity<ApiResponse<JobResponse>> assignDriver(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
+            @PathVariable Long jobId,
+            @RequestBody AssignDriverRequest request) {
+        String username = securityService.extractUsernameFromToken(authHeader);
+        JobResponse data = jobService.assignDriver(jobId, request.getDriverUserId(), username);
+        return ResponseEntity.ok(ApiResponse.success(data, "Driver updated"));
     }
 
     @Operation(summary = "Start a job",
@@ -154,17 +181,67 @@ public class JobController {
     }
 
     @Operation(summary = "Cancel a delivery stop",
-            description = "Cancels the given order's stop within an open job, and cancels the order too (the customer "
-                    + "no longer wants the delivery). A cancelled stop counts as closed, so cancelling the last open "
-                    + "stop completes the job.")
+            description = "The customer no longer wants the delivery; a reason is required (OTHER needs a note). The "
+                    + "owner cancels at once (stop and order CANCELLED; when every stop is delivered or cancelled the "
+                    + "job completes). The driver only reports it: the stop becomes CANCEL_REQUESTED and the owner "
+                    + "approves or rejects.")
     @PatchMapping("/{jobId}/stops/{orderId}/cancel")
     public ResponseEntity<ApiResponse<JobResponse>> cancelStop(
             @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
             @PathVariable Long jobId,
+            @PathVariable Long orderId,
+            @Valid @RequestBody(required = false) StopActionRequest request) {
+        String username = securityService.extractUsernameFromToken(authHeader);
+        JobResponse data = jobService.cancelStop(jobId, orderId, request, username);
+        return ResponseEntity.ok(ApiResponse.success(data, "Stop cancelled"));
+    }
+
+    @Operation(summary = "Approve a driver's cancel report",
+            description = "Owner only. A CANCEL_REQUESTED stop becomes CANCELLED and its order CANCELLED; the driver is told.")
+    @PatchMapping("/{jobId}/stops/{orderId}/cancel-approve")
+    public ResponseEntity<ApiResponse<JobResponse>> approveCancel(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
+            @PathVariable Long jobId,
             @PathVariable Long orderId) {
         String username = securityService.extractUsernameFromToken(authHeader);
-        JobResponse data = jobService.cancelStop(jobId, orderId, username);
-        return ResponseEntity.ok(ApiResponse.success(data, "Stop cancelled"));
+        return ResponseEntity.ok(ApiResponse.success(jobService.approveCancel(jobId, orderId, username),
+                "Cancel approved"));
+    }
+
+    @Operation(summary = "Reject a driver's cancel report",
+            description = "Owner only. A CANCEL_REQUESTED stop goes back to pending delivery; the driver is told.")
+    @PatchMapping("/{jobId}/stops/{orderId}/cancel-reject")
+    public ResponseEntity<ApiResponse<JobResponse>> rejectCancel(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
+            @PathVariable Long jobId,
+            @PathVariable Long orderId) {
+        String username = securityService.extractUsernameFromToken(authHeader);
+        return ResponseEntity.ok(ApiResponse.success(jobService.rejectCancel(jobId, orderId, username),
+                "Cancel rejected"));
+    }
+
+    @Operation(summary = "Give back a job (driver)",
+            description = "Assigned driver only, before the job starts. The job loses its driver and the owner is "
+                    + "told. reason (NOT_AVAILABLE_DATE, TOO_FAR, VEHICLE, OTHER) and note (OTHER only, max 200) are "
+                    + "optional, as for declining a request.")
+    @PatchMapping("/{jobId}/release")
+    public ResponseEntity<ApiResponse<Void>> releaseJob(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
+            @PathVariable Long jobId,
+            @Valid @RequestBody(required = false) DeclineRequest request) {
+        String username = securityService.extractUsernameFromToken(authHeader);
+        jobDriverRequestService.release(username, jobId, request);
+        return ResponseEntity.ok(ApiResponse.success(null, "Job released"));
+    }
+
+    @Operation(summary = "Job history",
+            description = "Who did what on the job and when, newest first — owner and assigned driver alike.")
+    @GetMapping("/{jobId}/events")
+    public ResponseEntity<ApiResponse<List<JobEventResponse>>> listEvents(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
+            @PathVariable Long jobId) {
+        String username = securityService.extractUsernameFromToken(authHeader);
+        return ResponseEntity.ok(ApiResponse.success(jobService.listEvents(jobId, username)));
     }
 
     @Operation(summary = "Close a job early",
@@ -177,5 +254,41 @@ public class JobController {
         String username = securityService.extractUsernameFromToken(authHeader);
         JobResponse data = jobService.closeJob(jobId, username);
         return ResponseEntity.ok(ApiResponse.success(data, "Job closed"));
+    }
+
+    @Operation(summary = "My pending job requests (driver)",
+            description = "DRIVER only. Jobs owners asked me to take, newest first, from teams I am still ACTIVE in — "
+                    + "a summary without customer data until I accept.")
+    @GetMapping("/driver-requests")
+    public ResponseEntity<ApiResponse<List<DriverRequestResponse>>> listDriverRequests(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader) {
+        String username = securityService.extractUsernameFromToken(authHeader);
+        return ResponseEntity.ok(ApiResponse.success(jobDriverRequestService.listMyRequests(username)));
+    }
+
+    @Operation(summary = "Accept a job request (driver)",
+            description = "DRIVER only. The job becomes mine and the owner is told. Refused when the request is no "
+                    + "longer pending, the job has started, or I left the owner's team. The {requestId} name is part "
+                    + "of the permission row in db/permissions-job-requests-data.sql.")
+    @PostMapping("/driver-requests/{requestId}/accept")
+    public ResponseEntity<ApiResponse<DriverRequestResponse>> acceptDriverRequest(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
+            @PathVariable Long requestId) {
+        String username = securityService.extractUsernameFromToken(authHeader);
+        return ResponseEntity.ok(ApiResponse.success(jobDriverRequestService.accept(username, requestId),
+                "Job accepted"));
+    }
+
+    @Operation(summary = "Decline a job request (driver)",
+            description = "DRIVER only. reason (NOT_AVAILABLE_DATE, TOO_FAR, VEHICLE, OTHER) and note (OTHER only, "
+                    + "max 200) are optional. The owner is told who declined and why.")
+    @PostMapping("/driver-requests/{requestId}/decline")
+    public ResponseEntity<ApiResponse<DriverRequestResponse>> declineDriverRequest(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
+            @PathVariable Long requestId,
+            @Valid @RequestBody(required = false) DeclineRequest request) {
+        String username = securityService.extractUsernameFromToken(authHeader);
+        return ResponseEntity.ok(ApiResponse.success(jobDriverRequestService.decline(username, requestId, request),
+                "Job declined"));
     }
 }

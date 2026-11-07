@@ -3,7 +3,9 @@ package com.core.exception;
 import com.common.dto.ApiResponse;
 import com.common.exception.InvalidRequestBodyException;
 import com.common.exception.InvalidTokenException;
+import com.common.exception.PermissionDeniedException;
 import com.common.exception.TokenExpiredException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -15,6 +17,7 @@ import org.springframework.web.servlet.NoHandlerFoundException;
 
 import java.util.List;
 
+@Slf4j
 @RestControllerAdvice(basePackages = "com.core.controller")
 public class GlobalExceptionHandler {
 
@@ -34,6 +37,16 @@ public class GlobalExceptionHandler {
                 ex.getMessage()
         );
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(response);
+    }
+
+    // the caller is known but this action is not for their account type (e.g. a driver on an owner endpoint)
+    @ExceptionHandler(PermissionDeniedException.class)
+    public ResponseEntity<ApiResponse<Void>> handlePermissionDeniedException(PermissionDeniedException ex) {
+        ApiResponse<Void> response = ApiResponse.error(
+                HttpStatus.FORBIDDEN.value(),
+                ex.getMessage()
+        );
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(response);
     }
 
     @ExceptionHandler(InvalidRequestBodyException.class)
@@ -103,6 +116,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<Void>> handleGenericException(Exception ex) {
+        log.error("Unexpected error occurred: ", ex);
         ApiResponse<Void> response = ApiResponse.error(
                 HttpStatus.INTERNAL_SERVER_ERROR.value(),
                 "An unexpected error occurred"

@@ -5,6 +5,8 @@ import com.authen.dto.LoginRequest;
 import com.authen.dto.LoginResponse;
 import com.authen.service.AuthenticationService;
 import com.common.dto.ApiResponse;
+import com.common.exception.SessionReplacedException;
+import com.master.service.FeatureFlagService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -16,6 +18,8 @@ import org.springframework.mock.web.MockHttpServletRequest;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -29,15 +33,35 @@ class AuthenticationControllerTest {
     @Mock
     private AuthenticationService authenticationService;
 
+    @Mock
+    private FeatureFlagService featureFlags;
+
     private AuthenticationController controller;
     private final MockHttpServletRequest httpRequest = new MockHttpServletRequest();
 
     @BeforeEach
     void setUp() {
-        controller = new AuthenticationController(authenticationService);
+        controller = new AuthenticationController(authenticationService, featureFlags);
+        lenient().when(featureFlags.isEnabled(FeatureFlagService.LOGIN)).thenReturn(true);
     }
 
     // ---------- login ----------
+
+    @Test
+    void should_return403WithoutCallingService_when_loginFeatureFlagOff() {
+        //GIVEN - FF_LOGIN = N
+        when(featureFlags.isEnabled(FeatureFlagService.LOGIN)).thenReturn(false);
+        LoginRequest request = new LoginRequest("admin", "S3cret!pass");
+
+        //WHEN
+        ResponseEntity<ApiResponse<LoginResponse>> response = controller.login(request, httpRequest);
+
+        //THEN
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(response.getBody().isSuccess()).isFalse();
+        assertThat(response.getBody().getMessage()).isEqualTo(AuthenticationController.MSG_LOGIN_DISABLED);
+        verifyNoInteractions(authenticationService);
+    }
 
     @Test
     void should_return200WithToken_when_loginSucceeds() {
@@ -204,5 +228,20 @@ class AuthenticationControllerTest {
         //THEN
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(response.getBody().getMessage()).isEqualTo("Token has expired");
+    }
+
+    @Test
+    void should_return401WithSessionReplacedCode_when_refreshingSessionEndedByAnotherLogin() {
+        //GIVEN
+        when(authenticationService.refreshToken("old-token", httpRequest))
+                .thenThrow(new SessionReplacedException());
+
+        //WHEN
+        ResponseEntity<ApiResponse<LoginResponse>> response = controller.refreshToken("Bearer old-token", httpRequest);
+
+        //THEN - the webapp keys its popup on the code
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getBody().getCode()).isEqualTo(SessionReplacedException.CODE);
+        assertThat(response.getBody().getMessage()).isEqualTo(SessionReplacedException.MESSAGE);
     }
 }

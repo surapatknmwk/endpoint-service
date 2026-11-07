@@ -35,6 +35,19 @@ public class GlobalExceptionHandler {
                         .build());
     }
 
+    @ExceptionHandler(AuthApiException.class)
+    public ResponseEntity<ApiResponse<Map<String, String>>> handleAuthApiException(AuthApiException ex) {
+        Map<String, String> errors = ex.getField() == null ? null : Map.of(ex.getField(), ex.getMessage());
+        return ResponseEntity
+                .status(ex.getStatus())
+                .body(ApiResponse.<Map<String, String>>builder()
+                        .success(false)
+                        .status(ex.getStatus().value())
+                        .message(ex.getMessage())
+                        .data(errors)
+                        .build());
+    }
+
     @ExceptionHandler(RuntimeException.class)
     public ResponseEntity<ApiResponse<Void>> handleRuntimeException(RuntimeException ex) {
         return ResponseEntity

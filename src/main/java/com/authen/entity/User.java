@@ -52,6 +52,10 @@ public class User {
     @Column(name = "last_login")
     private LocalDateTime lastLogin;
 
+    // last use of the app — written only by UserRepository.touchLastSeen, never by saving this entity
+    @Column(name = "last_seen_at", insertable = false, updatable = false)
+    private LocalDateTime lastSeenAt;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

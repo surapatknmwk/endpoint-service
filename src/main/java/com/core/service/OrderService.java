@@ -61,6 +61,7 @@ public class OrderService {
                 .sequenceNo(request.getSequenceNo() != null ? request.getSequenceNo() : 1)
                 .detail(request.getDetail())
                 .remark(request.getRemark())
+                .appointmentDate(request.getAppointmentDate())
                 // orderStatus ไม่รับจาก request — order ใหม่เริ่มที่ NEW เสมอ
                 .orderStatus(OrderStatus.NEW)
                 .createdBy(username)
@@ -125,6 +126,8 @@ public class OrderService {
         order.setSequenceNo(request.getSequenceNo() != null ? request.getSequenceNo() : order.getSequenceNo());
         order.setDetail(request.getDetail());
         order.setRemark(request.getRemark());
+        // เปลี่ยนวันนัด = ไม่ตรงกับ appointmentRemindedDate แล้ว จึงแจ้งเตือนใหม่ได้เอง (OrderDueReminderService)
+        order.setAppointmentDate(request.getAppointmentDate());
         // orderStatus ไม่รับจาก request — เปลี่ยนได้เฉพาะผ่าน complete/cancel และ JobService
         // (ไม่งั้นแก้ order ที่อยู่ใน job จะกลายเป็น NEW ทั้งที่ยังผูกกับ job อยู่)
         order.setUpdatedBy(username);
@@ -257,6 +260,7 @@ public class OrderService {
                 .detail(order.getDetail())
                 .remark(order.getRemark())
                 .orderStatus(order.getOrderStatus())
+                .appointmentDate(order.getAppointmentDate())
                 .createdAt(order.getCreatedAt())
                 .updatedAt(order.getUpdatedAt())
                 .build();

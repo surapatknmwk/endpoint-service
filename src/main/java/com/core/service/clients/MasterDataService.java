@@ -6,6 +6,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.Collection;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
 /**
  * เรียกข้อมูล province/district/subdistrict แบบ in-process ผ่าน master module โดยตรง
  * (master, core, search อยู่ใน Spring Boot application เดียวกัน จึงไม่ต้องยิง HTTP ออกไปอีก service)
@@ -34,6 +40,24 @@ public class MasterDataService {
                     .subdistrictCode(subdistrictCode)
                     .build();
         }
+    }
+
+    // ==================== By subdistrict ====================
+
+    /** Full address (names and parent codes) of a subdistrict; empty when the code does not exist. */
+    public Optional<AddressInfoDto> findBySubdistrict(String subdistrictCode) {
+        if (subdistrictCode == null) {
+            return Optional.empty();
+        }
+        return Optional.of(toAddressInfoDto(addressService.getFullAddressInfoBySubdistrict(subdistrictCode)))
+                .filter(a -> a.getProvinceCode() != null);
+    }
+
+    /** {@link #findBySubdistrict} for many codes in one query; unknown codes are left out. */
+    public Map<String, AddressInfoDto> findBySubdistricts(Collection<String> subdistrictCodes) {
+        return addressService.getFullAddressInfoBySubdistrictCodeBatch(subdistrictCodes).stream()
+                .map(this::toAddressInfoDto)
+                .collect(Collectors.toMap(AddressInfoDto::getSubdistrictCode, Function.identity(), (a, b) -> a));
     }
 
     // ==================== Mappers ====================

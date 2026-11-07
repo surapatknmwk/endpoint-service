@@ -44,4 +44,10 @@ public class UserSession {
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
 
+    /** null = active · {@link #ENDED_REPLACED} = ended because the user logged in on another device. */
+    @Column(name = "ended_reason", length = 20)
+    private String endedReason;
+
+    public static final String ENDED_REPLACED = "REPLACED";
+
 }

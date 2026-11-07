@@ -7,6 +7,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Data
@@ -63,6 +64,9 @@ public class OrderResponse {
 
     @Schema(description = "Delivery status", example = "PENDING")
     private String orderStatus;
+
+    @Schema(description = "Appointment date agreed with the customer; null = no appointment", example = "2026-11-12")
+    private LocalDate appointmentDate;
 
     @Schema(description = "Record creation timestamp", example = "2024-01-15T10:30:00")
     private LocalDateTime createdAt;

@@ -25,11 +25,13 @@ public interface DeliveryRoutingRepository extends JpaRepository<DeliveryRouting
 
     /**
      * จำนวนครั้งที่แต่ละ order ถูกข้าม นับจากงานที่ปิดแล้ว (ไม่นับงานที่ถูกลบ) รวมงาน {@code jobId} ที่กำลังจะปิด
-     * แต่ละแถวคือ [orderId, จำนวนครั้ง]
+     * แต่ละแถวคือ [orderId, จำนวนครั้ง] · ไม่นับจุดที่กลายเป็นข้ามเพราะปิดงาน (JOB_CLOSED / CANCEL_NOT_APPROVED)
+     * — รอบนั้นไม่มีใครไปส่งจริง
      */
     @Query("select r.order.orderId, count(r) from DeliveryRouting r "
             + "where r.order.orderId in :orderIds and upper(r.routingStatus) = 'SKIPPED' "
             + "and r.deliveryJob.status = 'A' "
+            + "and (r.statusReason is null or r.statusReason not in ('JOB_CLOSED', 'CANCEL_NOT_APPROVED')) "
             + "and (upper(r.deliveryJob.deliveryStatus) = 'COMPLETED' or r.deliveryJob.jobId = :jobId) "
             + "group by r.order.orderId")
     List<Object[]> countSkipsByOrder(@Param("orderIds") List<Long> orderIds, @Param("jobId") Long jobId);

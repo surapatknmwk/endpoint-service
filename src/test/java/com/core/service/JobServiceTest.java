@@ -11,11 +11,21 @@ import com.core.dto.RoutePreviewResponse;
 import com.core.dto.master.AddressInfoDto;
 import com.core.entity.Order;
 import com.core.entity.OrderAddress;
+import com.authen.repository.UserRepository;
+import com.core.dto.GeoPoint;
+import com.core.dto.JobEventResponse;
+import com.core.dto.StopActionRequest;
+import com.core.entity.DeliveryJobEvent;
+import com.authen.entity.User;
+import com.core.repository.DeliveryJobEventRepository;
 import com.core.repository.DeliveryJobRepository;
+import com.core.service.notification.TeamNotifier;
 import com.core.repository.DeliveryRoutingRepository;
 import com.core.repository.OrderRepository;
 import com.common.util.GeoDistance;
 import com.core.service.clients.MasterDataService;
+import com.core.service.team.JobAccessService;
+import com.core.service.team.JobDriverRequestService;
 import com.master.dto.GoogleRouteDistanceResponse;
 import com.master.entity.District;
 import com.master.entity.Province;
@@ -79,8 +89,21 @@ class JobServiceTest {
     private MasterDataService masterDataService;
     @Mock
     private GoogleRoutesService googleRoutesService;
+    @Mock
+    private JobAccessService jobAccessService;
+    @Mock
+    private JobDriverRequestService jobDriverRequestService;
+    @Mock
+    private DeliveryJobEventRepository deliveryJobEventRepository;
+    @Mock
+    private UserRepository userRepository;
+    @Mock
+    private TeamNotifier teamNotifier;
 
     private JobService jobService;
+
+    private static final StopActionRequest SKIP = new StopActionRequest("CUSTOMER_ABSENT", null);
+    private static final StopActionRequest CANCEL = new StopActionRequest("CHANGED_MIND", null);
 
     // 9 ต.ค. 2026 10:00 เวลาไทย
     private static final LocalDateTime NOW = LocalDateTime.of(2026, 10, 9, 10, 0);
@@ -89,7 +112,8 @@ class JobServiceTest {
     @BeforeEach
     void setUp() {
         jobService = new JobService(deliveryJobRepository, deliveryRoutingRepository, orderRepository,
-                subdistrictRepository, subdistrictDistanceRepository, masterDataService, googleRoutesService, CLOCK);
+                subdistrictRepository, subdistrictDistanceRepository, masterDataService, googleRoutesService, CLOCK,
+                jobAccessService, jobDriverRequestService, deliveryJobEventRepository, userRepository, teamNotifier);
         lenient().when(masterDataService.getAddressInfoSafe(any(), any(), any()))
                 .thenReturn(AddressInfoDto.builder().build());
     }
@@ -888,7 +912,7 @@ class JobServiceTest {
         givenStops(job, first, second);
 
         //WHEN
-        JobResponse result = jobService.skipStop(1L, 10L, "admin");
+        JobResponse result = jobService.skipStop(1L, 10L, SKIP, "admin");
 
         //THEN
         assertThat(first.getRoutingStatus()).isEqualTo("SKIPPED");
@@ -899,8 +923,8 @@ class JobServiceTest {
     }
 
     @Test
-    void should_completeJobAndReturnSkippedOrdersToPending_when_lastOpenStopIsSkipped() {
-        //GIVEN
+    void should_keepJobOpenAndOrdersInTransit_when_lastOpenStopIsSkipped() {
+        //GIVEN — risk ข้อ 3: ข้ามจุดสุดท้ายแล้วงานต้องไม่ปิดเอง
         DeliveryJob job = job(1L, "IN_PROGRESS");
         DeliveryRouting delivered = routing(job, 10L, 1, "COMPLETED", "COMPLETED");
         DeliveryRouting skippedEarlier = routing(job, 11L, 2, "SKIPPED", "IN_TRANSIT");
@@ -908,14 +932,16 @@ class JobServiceTest {
         givenStops(job, delivered, skippedEarlier, last);
 
         //WHEN
-        jobService.skipStop(1L, 12L, "admin");
+        JobResponse result = jobService.skipStop(1L, 12L, SKIP, "admin");
 
         //THEN
-        assertThat(job.getDeliveryStatus()).isEqualTo("COMPLETED");
-        assertThat(job.getCompletedDate()).isNotNull();
-        assertThat(skippedEarlier.getOrder().getOrderStatus()).isEqualTo("PENDING");
-        assertThat(last.getOrder().getOrderStatus()).isEqualTo("PENDING");
-        assertThat(delivered.getOrder().getOrderStatus()).isEqualTo("COMPLETED");
+        assertThat(last.getRoutingStatus()).isEqualTo("SKIPPED");
+        assertThat(job.getDeliveryStatus()).isEqualTo("IN_PROGRESS");
+        assertThat(job.getCompletedDate()).isNull();
+        assertThat(result.getDeliveryStatus()).isEqualTo("IN_PROGRESS");
+        assertThat(skippedEarlier.getOrder().getOrderStatus()).isEqualTo("IN_TRANSIT");
+        assertThat(last.getOrder().getOrderStatus()).isEqualTo("IN_TRANSIT");
+        verify(deliveryJobRepository, never()).save(any());
     }
 
     @Test
@@ -926,7 +952,7 @@ class JobServiceTest {
         givenStops(job, delivered);
 
         //WHEN / THEN
-        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, "admin"))
+        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, SKIP, "admin"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("already");
         verify(deliveryRoutingRepository, never()).save(any());
@@ -940,7 +966,7 @@ class JobServiceTest {
         givenStops(job, skipped);
 
         //WHEN / THEN
-        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, "admin"))
+        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, SKIP, "admin"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("already completed");
     }
@@ -951,7 +977,7 @@ class JobServiceTest {
         when(deliveryRoutingRepository.findByDeliveryJobJobIdAndOrderOrderId(1L, 99L)).thenReturn(Optional.empty());
 
         //WHEN / THEN
-        assertThatThrownBy(() -> jobService.skipStop(1L, 99L, "admin"))
+        assertThatThrownBy(() -> jobService.skipStop(1L, 99L, SKIP, "admin"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("not found");
     }
@@ -974,7 +1000,7 @@ class JobServiceTest {
     }
 
     @Test
-    void should_completeJobAndReturnSkippedOrdersToPending_when_lastOpenStopIsCompleted() {
+    void should_keepJobOpen_when_lastOpenStopIsCompletedButAnotherStopIsSkipped() {
         //GIVEN
         DeliveryJob job = job(1L, "IN_PROGRESS");
         DeliveryRouting skipped = routing(job, 10L, 1, "SKIPPED", "IN_TRANSIT");
@@ -985,10 +1011,10 @@ class JobServiceTest {
         jobService.completeStop(1L, 11L, "admin");
 
         //THEN
-        assertThat(job.getDeliveryStatus()).isEqualTo("COMPLETED");
+        assertThat(job.getDeliveryStatus()).isEqualTo("IN_PROGRESS");
         assertThat(last.getOrder().getOrderStatus()).isEqualTo("COMPLETED");
         assertThat(skipped.getRoutingStatus()).isEqualTo("SKIPPED");
-        assertThat(skipped.getOrder().getOrderStatus()).isEqualTo("PENDING");
+        assertThat(skipped.getOrder().getOrderStatus()).isEqualTo("IN_TRANSIT");
     }
 
     @Test
@@ -1070,7 +1096,7 @@ class JobServiceTest {
         givenStops(job, stop);
 
         //WHEN / THEN
-        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, "admin"))
+        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, SKIP, "admin"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Job not found");
         assertThat(stop.getRoutingStatus()).isEqualTo("NEW");
@@ -1111,7 +1137,7 @@ class JobServiceTest {
     }
 
     @Test
-    void should_completeJobAndReturnSkippedOrdersToPending_when_updateRemovesLastOpenStop() {
+    void should_keepJobOpen_when_updateRemovesLastOpenStopButASkippedStopRemains() {
         //GIVEN
         DeliveryJob job = job(1L, "IN_PROGRESS");
         DeliveryRouting delivered = routing(job, 10L, 1, "COMPLETED", "COMPLETED");
@@ -1123,13 +1149,29 @@ class JobServiceTest {
         JobResponse result = jobService.updateJob(1L, updateRequest(10L, 11L), "admin");
 
         //THEN
-        assertThat(job.getDeliveryStatus()).isEqualTo("COMPLETED");
-        assertThat(job.getCompletedDate()).isNotNull();
-        assertThat(result.getDeliveryStatus()).isEqualTo("COMPLETED");
-        assertThat(skipped.getOrder().getOrderStatus()).isEqualTo("PENDING");
+        assertThat(result.getDeliveryStatus()).isEqualTo("IN_PROGRESS");
+        assertThat(job.getCompletedDate()).isNull();
+        assertThat(skipped.getOrder().getOrderStatus()).isEqualTo("IN_TRANSIT");
         assertThat(open.getOrder().getOrderStatus()).isEqualTo("NEW");
-        assertThat(delivered.getOrder().getOrderStatus()).isEqualTo("COMPLETED");
         verify(deliveryRoutingRepository).deleteAll(List.of(open));
+    }
+
+    @Test
+    void should_completeJob_when_updateLeavesOnlyDeliveredAndCancelledStops() {
+        //GIVEN
+        DeliveryJob job = job(1L, "IN_PROGRESS");
+        DeliveryRouting delivered = routing(job, 10L, 1, "COMPLETED", "COMPLETED");
+        DeliveryRouting cancelled = routing(job, 11L, 2, "CANCELLED", "CANCELLED");
+        DeliveryRouting open = routing(job, 12L, 3, "NEW", "IN_TRANSIT");
+        givenUpdatableJob(job, delivered, cancelled, open);
+
+        //WHEN
+        JobResponse result = jobService.updateJob(1L, updateRequest(10L, 11L), "admin");
+
+        //THEN
+        assertThat(result.getDeliveryStatus()).isEqualTo("COMPLETED");
+        assertThat(job.getCompletedDate()).isNotNull();
+        assertThat(open.getOrder().getOrderStatus()).isEqualTo("NEW");
     }
 
     @Test
@@ -1215,7 +1257,7 @@ class JobServiceTest {
         givenStops(job, cancelled);
 
         //WHEN / THEN
-        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, "admin"))
+        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, SKIP, "admin"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("already");
         verify(deliveryRoutingRepository, never()).save(any());
@@ -1233,7 +1275,7 @@ class JobServiceTest {
         givenStops(job, target, open);
 
         //WHEN
-        JobResponse result = jobService.cancelStop(1L, 10L, "admin");
+        JobResponse result = jobService.cancelStop(1L, 10L, CANCEL, "admin");
 
         //THEN
         assertThat(target.getRoutingStatus()).isEqualTo("CANCELLED");
@@ -1245,7 +1287,7 @@ class JobServiceTest {
     }
 
     @Test
-    void should_completeJobAndReturnSkippedOrdersToPending_when_lastOpenStopIsCancelled() {
+    void should_keepJobOpen_when_ownerCancelsLastOpenStopButAnotherStopIsSkipped() {
         //GIVEN
         DeliveryJob job = job(1L, "IN_PROGRESS");
         DeliveryRouting delivered = routing(job, 10L, 1, "COMPLETED", "COMPLETED");
@@ -1254,14 +1296,12 @@ class JobServiceTest {
         givenStops(job, delivered, skipped, last);
 
         //WHEN
-        JobResponse result = jobService.cancelStop(1L, 12L, "admin");
+        JobResponse result = jobService.cancelStop(1L, 12L, CANCEL, "admin");
 
         //THEN
-        assertThat(result.getDeliveryStatus()).isEqualTo("COMPLETED");
-        assertThat(job.getCompletedDate()).isNotNull();
+        assertThat(result.getDeliveryStatus()).isEqualTo("IN_PROGRESS");
         assertThat(last.getOrder().getOrderStatus()).isEqualTo("CANCELLED");
-        assertThat(skipped.getOrder().getOrderStatus()).isEqualTo("PENDING");
-        assertThat(delivered.getOrder().getOrderStatus()).isEqualTo("COMPLETED");
+        assertThat(skipped.getOrder().getOrderStatus()).isEqualTo("IN_TRANSIT");
     }
 
     @Test
@@ -1273,7 +1313,7 @@ class JobServiceTest {
         givenStops(job, cancelledEarlier, last);
 
         //WHEN
-        jobService.cancelStop(1L, 11L, "admin");
+        jobService.cancelStop(1L, 11L, CANCEL, "admin");
 
         //THEN
         assertThat(job.getDeliveryStatus()).isEqualTo("COMPLETED");
@@ -1289,7 +1329,7 @@ class JobServiceTest {
         givenStops(job, finished);
 
         //WHEN / THEN
-        assertThatThrownBy(() -> jobService.cancelStop(1L, 10L, "admin"))
+        assertThatThrownBy(() -> jobService.cancelStop(1L, 10L, CANCEL, "admin"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("already " + stopStatus);
         assertThat(finished.getOrder().getOrderStatus()).isEqualTo(stopStatus);
@@ -1305,7 +1345,7 @@ class JobServiceTest {
         givenStops(job, skipped);
 
         //WHEN / THEN
-        assertThatThrownBy(() -> jobService.cancelStop(1L, 10L, "admin"))
+        assertThatThrownBy(() -> jobService.cancelStop(1L, 10L, CANCEL, "admin"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("already completed");
         assertThat(skipped.getOrder().getOrderStatus()).isEqualTo("PENDING");
@@ -1319,7 +1359,7 @@ class JobServiceTest {
         givenStops(job, stop);
 
         //WHEN / THEN
-        assertThatThrownBy(() -> jobService.cancelStop(1L, 10L, "admin"))
+        assertThatThrownBy(() -> jobService.cancelStop(1L, 10L, CANCEL, "admin"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Job not found");
         assertThat(stop.getOrder().getOrderStatus()).isEqualTo("NEW");
@@ -1414,16 +1454,17 @@ class JobServiceTest {
         //GIVEN — boundary รอบ N = 2 (นับรวมงานนี้)
         DeliveryJob job = job(1L, "IN_PROGRESS");
         DeliveryRouting delivered = routing(job, 10L, 1, "COMPLETED", "COMPLETED");
-        DeliveryRouting last = routing(job, 11L, 2, "NEW", "IN_TRANSIT");
-        givenStops(job, delivered, last);
+        DeliveryRouting skipped = routing(job, 11L, 2, "SKIPPED", "IN_TRANSIT");
+        when(deliveryJobRepository.findById(1L)).thenReturn(Optional.of(job));
+        givenStops(job, delivered, skipped);
         givenSkipCount(11L, skips);
 
         //WHEN
-        jobService.skipStop(1L, 11L, "admin");
+        jobService.closeJob(1L, "admin");
 
         //THEN
         assertThat(job.getDeliveryStatus()).isEqualTo("COMPLETED");
-        assertThat(last.getOrder().getOrderStatus()).isEqualTo(expectedStatus);
+        assertThat(skipped.getOrder().getOrderStatus()).isEqualTo(expectedStatus);
         assertThat(delivered.getOrder().getOrderStatus()).isEqualTo("COMPLETED");
     }
 
@@ -1432,13 +1473,14 @@ class JobServiceTest {
         //GIVEN — order 10 ถูกข้ามรอบที่ 2 แล้ว, order 11 เพิ่งถูกข้ามครั้งแรก
         DeliveryJob job = job(1L, "IN_PROGRESS");
         DeliveryRouting skippedTwice = routing(job, 10L, 1, "SKIPPED", "IN_TRANSIT");
-        DeliveryRouting skippedOnce = routing(job, 11L, 2, "NEW", "IN_TRANSIT");
+        DeliveryRouting skippedOnce = routing(job, 11L, 2, "SKIPPED", "IN_TRANSIT");
+        when(deliveryJobRepository.findById(1L)).thenReturn(Optional.of(job));
         givenStops(job, skippedTwice, skippedOnce);
         when(deliveryRoutingRepository.countSkipsByOrder(anyList(), eq(1L)))
                 .thenReturn(List.of(new Object[]{10L, 2L}, new Object[]{11L, 1L}));
 
         //WHEN
-        JobResponse result = jobService.skipStop(1L, 11L, "admin");
+        JobResponse result = jobService.closeJob(1L, "admin");
 
         //THEN
         assertThat(skippedTwice.getOrder().getOrderStatus()).isEqualTo("FAILED");
@@ -1675,7 +1717,7 @@ class JobServiceTest {
         givenStops(job, target, other);
 
         //WHEN
-        jobService.skipStop(1L, 10L, "admin");
+        jobService.skipStop(1L, 10L, SKIP, "admin");
 
         //THEN
         assertThat(job.getDeliveryStatus()).isEqualTo("IN_PROGRESS");
@@ -1693,7 +1735,7 @@ class JobServiceTest {
         givenStops(job, target, other);
 
         //WHEN
-        jobService.cancelStop(1L, 10L, "admin");
+        jobService.cancelStop(1L, 10L, CANCEL, "admin");
 
         //THEN
         assertThat(job.getDeliveryStatus()).isEqualTo("IN_PROGRESS");
@@ -1830,9 +1872,9 @@ class JobServiceTest {
         //WHEN / THEN
         assertThatThrownBy(() -> jobService.completeStop(1L, 10L, "admin"))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("Delivery stop not found for job 1 and order 10");
-        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, "admin"))
+        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, SKIP, "admin"))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("Delivery stop not found for job 1 and order 10");
-        assertThatThrownBy(() -> jobService.cancelStop(1L, 10L, "admin"))
+        assertThatThrownBy(() -> jobService.cancelStop(1L, 10L, CANCEL, "admin"))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("Delivery stop not found for job 1 and order 10");
         assertThatThrownBy(() -> jobService.reopenStop(1L, 11L, "admin"))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("Delivery stop not found for job 1 and order 11");
@@ -1896,5 +1938,353 @@ class JobServiceTest {
                 .orderIds(List.of(10L))
                 .build(), "admin"))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("Order not found: 10");
+    }
+
+    // ─── driver-risk รอบ 2: เหตุผล · แจ้งยกเลิก / อนุมัติ · ปิดงาน · ประวัติ ─────────────────
+
+    private DeliveryJob driverJob(long id) {
+        DeliveryJob job = job(id, "IN_PROGRESS");
+        job.setAssignedDriverId(3);
+        lenient().when(jobAccessService.isAssignedActiveDriver(job, "driver1")).thenReturn(true);
+        return job;
+    }
+
+    private static User user(int id, String username) {
+        User user = new User();
+        user.setUserId(id);
+        user.setUsername(username);
+        return user;
+    }
+
+    @ParameterizedTest
+    @CsvSource(nullValues = "NULL", value = {
+            "NULL, NULL, กรุณาเลือกเหตุผล",
+            "CHANGED_MIND, NULL, เหตุผลไม่ถูกต้อง",
+            "OTHER, NULL, กรุณาพิมพ์รายละเอียด",
+            "OTHER, '   ', กรุณาพิมพ์รายละเอียด"})
+    void should_rejectSkipAndSaveNothing_when_reasonIsMissingOrInvalid(String reason, String note, String message) {
+        //GIVEN — CHANGED_MIND เป็นเหตุผลของการยกเลิก ไม่ใช่การข้าม
+        DeliveryJob job = job(1L, "IN_PROGRESS");
+        DeliveryRouting stop = routing(job, 10L, 1, "NEW", "IN_TRANSIT");
+        givenStops(job, stop);
+
+        //WHEN / THEN
+        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, new StopActionRequest(reason, note), "admin"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(message);
+        assertThat(stop.getRoutingStatus()).isEqualTo("NEW");
+        verify(deliveryRoutingRepository, never()).save(any());
+        verify(deliveryJobEventRepository, never()).save(any());
+    }
+
+    @Test
+    void should_rejectSkip_when_bodyIsMissing() {
+        //WHEN / THEN — interface: ไม่ส่ง body มาเลย
+        assertThatThrownBy(() -> jobService.skipStop(1L, 10L, null, "admin"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("กรุณาเลือกเหตุผล");
+    }
+
+    @Test
+    void should_storeReasonAndRecordEvent_when_skippingStopWithReason() {
+        //GIVEN
+        DeliveryJob job = job(1L, "IN_PROGRESS");
+        DeliveryRouting stop = routing(job, 10L, 1, "NEW", "IN_TRANSIT");
+        DeliveryRouting other = routing(job, 11L, 2, "NEW", "IN_TRANSIT");
+        givenStops(job, stop, other);
+
+        //WHEN
+        JobResponse result = jobService.skipStop(1L, 10L, new StopActionRequest("OTHER", "  ฝนตกหนัก  "), "admin");
+
+        //THEN
+        assertThat(stop.getStatusReason()).isEqualTo("OTHER");
+        assertThat(stop.getStatusNote()).isEqualTo("ฝนตกหนัก");
+        assertThat(result.getRoutings().get(0).getStatusReasonText()).isEqualTo("ฝนตกหนัก");
+        verify(deliveryJobEventRepository).save(argThat(e -> "STOP_SKIPPED".equals(e.getEventType())
+                && e.getJobId() == 1L && e.getOrderId() == 10L && "OTHER".equals(e.getReason())
+                && "admin".equals(e.getActorUsername()) && NOW.equals(e.getCreatedAt())));
+    }
+
+    @Test
+    void should_requestCancelAndKeepOrderAndTellOwner_when_driverReportsCustomerCancelled() {
+        //GIVEN
+        DeliveryJob job = driverJob(1L);
+        DeliveryRouting stop = routing(job, 10L, 1, "NEW", "IN_TRANSIT");
+        DeliveryRouting other = routing(job, 11L, 2, "COMPLETED", "COMPLETED");
+        givenStops(job, stop, other);
+        User owner = user(1, "admin");
+        User driver = user(3, "driver1");
+        when(userRepository.findByUsername("admin")).thenReturn(Optional.of(owner));
+        when(userRepository.findByUsername("driver1")).thenReturn(Optional.of(driver));
+
+        //WHEN
+        JobResponse result = jobService.cancelStop(1L, 10L, CANCEL, "driver1");
+
+        //THEN — ยังไม่ยกเลิกจริง และงานยังไม่ปิด แม้ไม่เหลือจุดค้าง
+        assertThat(stop.getRoutingStatus()).isEqualTo("CANCEL_REQUESTED");
+        assertThat(stop.getStatusReason()).isEqualTo("CHANGED_MIND");
+        assertThat(stop.getOrder().getOrderStatus()).isEqualTo("IN_TRANSIT");
+        assertThat(result.getDeliveryStatus()).isEqualTo("IN_PROGRESS");
+        verify(orderRepository, never()).save(any());
+        verify(teamNotifier).stopCancelRequested(job, owner, driver, null, "ลูกค้าเปลี่ยนใจ");
+        verify(deliveryJobEventRepository).save(argThat(e -> "STOP_CANCEL_REQUESTED".equals(e.getEventType())));
+    }
+
+    @Test
+    void should_rejectCancelReport_when_stopAlreadyHasCancelRequest() {
+        //GIVEN
+        DeliveryJob job = driverJob(1L);
+        DeliveryRouting stop = routing(job, 10L, 1, "CANCEL_REQUESTED", "IN_TRANSIT");
+        givenStops(job, stop);
+
+        //WHEN / THEN
+        assertThatThrownBy(() -> jobService.cancelStop(1L, 10L, CANCEL, "driver1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("already CANCEL_REQUESTED");
+        verify(teamNotifier, never()).stopCancelRequested(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void should_cancelAndCompleteJobAndTellDriver_when_ownerApprovesLastCancelRequest() {
+        //GIVEN
+        DeliveryJob job = driverJob(1L);
+        DeliveryRouting delivered = routing(job, 10L, 1, "COMPLETED", "COMPLETED");
+        DeliveryRouting requested = routing(job, 11L, 2, "CANCEL_REQUESTED", "IN_TRANSIT");
+        requested.setStatusReason("DUPLICATE_ORDER");
+        givenStops(job, delivered, requested);
+        User driver = user(3, "driver1");
+        when(userRepository.findById(3)).thenReturn(Optional.of(driver));
+
+        //WHEN
+        JobResponse result = jobService.approveCancel(1L, 11L, "admin");
+
+        //THEN — เหตุผลเดิมของคนส่งยังอยู่
+        assertThat(requested.getRoutingStatus()).isEqualTo("CANCELLED");
+        assertThat(requested.getStatusReason()).isEqualTo("DUPLICATE_ORDER");
+        assertThat(requested.getOrder().getOrderStatus()).isEqualTo("CANCELLED");
+        assertThat(result.getDeliveryStatus()).isEqualTo("COMPLETED");
+        verify(teamNotifier).stopCancelAnswered(job, driver, null, true);
+        verify(deliveryJobEventRepository).save(argThat(e -> "STOP_CANCEL_APPROVED".equals(e.getEventType())));
+        verify(deliveryJobEventRepository).save(argThat(e -> "JOB_FINISHED".equals(e.getEventType())));
+    }
+
+    @Test
+    void should_reopenStopAndClearReasonAndTellDriver_when_ownerRejectsCancelRequest() {
+        //GIVEN
+        DeliveryJob job = driverJob(1L);
+        DeliveryRouting requested = routing(job, 10L, 1, "CANCEL_REQUESTED", "IN_TRANSIT");
+        requested.setStatusReason("CHANGED_MIND");
+        requested.setStatusNote("โทรมาบอก");
+        givenStops(job, requested);
+        User driver = user(3, "driver1");
+        when(userRepository.findById(3)).thenReturn(Optional.of(driver));
+
+        //WHEN
+        JobResponse result = jobService.rejectCancel(1L, 10L, "admin");
+
+        //THEN
+        assertThat(requested.getRoutingStatus()).isEqualTo("NEW");
+        assertThat(requested.getStatusReason()).isNull();
+        assertThat(requested.getStatusNote()).isNull();
+        assertThat(requested.getOrder().getOrderStatus()).isEqualTo("IN_TRANSIT");
+        assertThat(result.getDeliveryStatus()).isEqualTo("IN_PROGRESS");
+        verify(teamNotifier).stopCancelAnswered(job, driver, null, false);
+    }
+
+    @Test
+    void should_reportStopNotFound_when_driverTriesToApproveCancel() {
+        //GIVEN
+        DeliveryJob job = driverJob(1L);
+        DeliveryRouting requested = routing(job, 10L, 1, "CANCEL_REQUESTED", "IN_TRANSIT");
+        givenStops(job, requested);
+
+        //WHEN / THEN
+        assertThatThrownBy(() -> jobService.approveCancel(1L, 10L, "driver1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Delivery stop not found");
+        assertThat(requested.getRoutingStatus()).isEqualTo("CANCEL_REQUESTED");
+        verify(orderRepository, never()).save(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"NEW", "SKIPPED", "CANCELLED"})
+    void should_rejectAnswer_when_stopHasNoCancelRequest(String stopStatus) {
+        //GIVEN
+        DeliveryJob job = job(1L, "IN_PROGRESS");
+        DeliveryRouting stop = routing(job, 10L, 1, stopStatus, "IN_TRANSIT");
+        givenStops(job, stop);
+
+        //WHEN / THEN
+        assertThatThrownBy(() -> jobService.rejectCancel(1L, 10L, "admin"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("has no cancel request");
+        verify(deliveryRoutingRepository, never()).save(any());
+    }
+
+    @Test
+    void should_deliverAndClearReason_when_cancelRequestedStopIsCompleted() {
+        //GIVEN — ลูกค้าเปลี่ยนใจอีกที คนส่งยืนยันส่งได้เลย
+        DeliveryJob job = driverJob(1L);
+        DeliveryRouting requested = routing(job, 10L, 1, "CANCEL_REQUESTED", "IN_TRANSIT");
+        requested.setStatusReason("CHANGED_MIND");
+        givenStops(job, requested);
+
+        //WHEN
+        JobResponse result = jobService.completeStop(1L, 10L, "driver1");
+
+        //THEN
+        assertThat(requested.getRoutingStatus()).isEqualTo("COMPLETED");
+        assertThat(requested.getStatusReason()).isNull();
+        assertThat(requested.getOrder().getOrderStatus()).isEqualTo("COMPLETED");
+        assertThat(result.getDeliveryStatus()).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void should_countUnansweredCancelRequestAsSkipWithReasons_when_closingJob() {
+        //GIVEN
+        DeliveryJob job = job(1L, "IN_PROGRESS");
+        DeliveryRouting open = routing(job, 10L, 1, "NEW", "IN_TRANSIT");
+        DeliveryRouting requested = routing(job, 11L, 2, "CANCEL_REQUESTED", "IN_TRANSIT");
+        requested.setStatusReason("CHANGED_MIND");
+        requested.setStatusNote("โทรมาบอก");
+        DeliveryRouting skipped = routing(job, 12L, 3, "SKIPPED", "IN_TRANSIT");
+        skipped.setStatusReason("CUSTOMER_ABSENT");
+        when(deliveryJobRepository.findById(1L)).thenReturn(Optional.of(job));
+        givenStops(job, open, requested, skipped);
+
+        //WHEN
+        JobResponse result = jobService.closeJob(1L, "admin");
+
+        //THEN — จุดที่ข้ามเองคงเหตุผลเดิม
+        assertThat(open.getRoutingStatus()).isEqualTo("SKIPPED");
+        assertThat(open.getStatusReason()).isEqualTo("JOB_CLOSED");
+        assertThat(requested.getRoutingStatus()).isEqualTo("SKIPPED");
+        assertThat(requested.getStatusReason()).isEqualTo("CANCEL_NOT_APPROVED");
+        assertThat(requested.getStatusNote()).isNull();
+        assertThat(requested.getOrder().getOrderStatus()).isEqualTo("PENDING");
+        assertThat(skipped.getStatusReason()).isEqualTo("CUSTOMER_ABSENT");
+        assertThat(result.getDeliveryStatus()).isEqualTo("COMPLETED");
+        verify(deliveryRoutingRepository).saveAll(List.of(open, requested));
+        verify(deliveryJobEventRepository).save(argThat(e -> "JOB_CLOSED".equals(e.getEventType())
+                && e.getOrderId() == null));
+    }
+
+    @Test
+    void should_returnEmptyHistory_when_jobHasNoEvents() {
+        //GIVEN
+        when(deliveryJobRepository.findById(1L)).thenReturn(Optional.of(job(1L, "IN_PROGRESS")));
+        when(deliveryJobEventRepository.findByJobIdOrderByEventIdDesc(1L)).thenReturn(List.of());
+
+        //WHEN / THEN
+        assertThat(jobService.listEvents(1L, "admin")).isEmpty();
+        verify(userRepository, never()).findByUsernameIn(any());
+    }
+
+    @Test
+    void should_describeWhoDidWhat_when_listingJobHistory() {
+        //GIVEN — คนส่งข้าม, เจ้าของเริ่มงาน, ผู้ใช้ที่ถูกลบไปแล้ว (ไม่เจอใน users)
+        DeliveryJob job = driverJob(1L);
+        when(deliveryJobRepository.findById(1L)).thenReturn(Optional.of(job));
+        when(deliveryJobEventRepository.findByJobIdOrderByEventIdDesc(1L)).thenReturn(List.of(
+                DeliveryJobEvent.builder().eventId(3L).jobId(1L).orderId(10L).eventType("STOP_SKIPPED")
+                        .reason("CUSTOMER_ABSENT").note("โทร 2 ครั้ง").actorUsername("driver1").createdAt(NOW).build(),
+                DeliveryJobEvent.builder().eventId(2L).jobId(1L).eventType("JOB_EDITED")
+                        .actorUsername("ghost").createdAt(NOW).build(),
+                DeliveryJobEvent.builder().eventId(1L).jobId(1L).eventType("JOB_STARTED")
+                        .actorUsername("admin").createdAt(NOW).build()));
+        when(userRepository.findByUsernameIn(any())).thenReturn(List.of(user(1, "admin"), user(3, "driver1")));
+        Order order = Order.builder().orderId(10L).customer(Customer.builder().name("คุณสมใจ").build()).build();
+        when(orderRepository.findAllById(any())).thenReturn(List.of(order));
+
+        //WHEN
+        List<JobEventResponse> events = jobService.listEvents(1L, "driver1");
+
+        //THEN
+        assertThat(events).extracting(JobEventResponse::getEventId).containsExactly(3L, 2L, 1L);
+        assertThat(events.get(0).getCustomerName()).isEqualTo("คุณสมใจ");
+        assertThat(events.get(0).getReasonText()).isEqualTo("ลูกค้าไม่อยู่ · โทร 2 ครั้ง");
+        assertThat(events.get(0).isByOwner()).isFalse();
+        assertThat(events.get(1).getActor().getUsername()).isEqualTo("ghost");
+        assertThat(events.get(1).getCustomerName()).isNull();
+        assertThat(events.get(2).isByOwner()).isTrue();
+    }
+
+    @Test
+    void should_reportJobNotFound_when_outsiderListsHistory() {
+        //GIVEN
+        when(deliveryJobRepository.findById(1L)).thenReturn(Optional.of(job(1L, "IN_PROGRESS")));
+
+        //WHEN / THEN
+        assertThatThrownBy(() -> jobService.listEvents(1L, "stranger"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Job not found");
+        verify(deliveryJobEventRepository, never()).findByJobIdOrderByEventIdDesc(any());
+    }
+
+    // ─── ตำแหน่งตอนกด (driver-risk ข้อ 12, 17, 18) ─────────────────────────────────────
+
+    private DeliveryRouting stopInSubdistrict(DeliveryJob job, long orderId, String subdistrictCode) {
+        DeliveryRouting r = routing(job, orderId, 1, "NEW", "IN_TRANSIT");
+        r.getOrder().setAddress(OrderAddress.builder().subdistrictCode(subdistrictCode).build());
+        return r;
+    }
+
+    @Test
+    void should_storePositionAndDistanceToCustomerArea_when_completingWithLocation() {
+        //GIVEN — ตำบลของลูกค้าอยู่ที่ 17.000, 104.000 · กดห่างไปทางเหนือ 0.01° (~1.1 กม.)
+        DeliveryJob job = job(1L, "IN_PROGRESS");
+        DeliveryRouting stop = stopInSubdistrict(job, 10L, "470101");
+        givenStops(job, stop, routing(job, 11L, 2, "NEW", "IN_TRANSIT"));
+        Subdistrict area = subdistrict(1L, "470101", district(1L, "4701", province(1L, "47")));
+        area.setLat(new BigDecimal("17.000000"));
+        area.setLng(new BigDecimal("104.000000"));
+        when(subdistrictRepository.findByCode("470101")).thenReturn(Optional.of(area));
+
+        //WHEN
+        jobService.completeStop(1L, 10L, new GeoPoint(17.01, 104.0, 24.6), "admin");
+
+        //THEN
+        verify(deliveryJobEventRepository).save(argThat(e -> "STOP_COMPLETED".equals(e.getEventType())
+                && new BigDecimal("17.010000").equals(e.getLat()) && new BigDecimal("104.000000").equals(e.getLng())
+                && e.getAccuracyM() == 25 && e.getDistanceKm() != null
+                && e.getDistanceKm().compareTo(new BigDecimal("1.0")) > 0
+                && e.getDistanceKm().compareTo(new BigDecimal("1.2")) < 0));
+    }
+
+    @ParameterizedTest
+    @CsvSource(nullValues = "NULL", value = {"NULL, 104.0", "95.0, 104.0", "17.0, 200.0", "0.0, 0.0"})
+    void should_recordWithoutPositionAndStillSkip_when_locationIsMissingOrInvalid(Double lat, Double lng) {
+        //GIVEN — interface: GPS ผิดรูป / ไม่มี ต้องไม่ขวางการข้าม
+        DeliveryJob job = job(1L, "IN_PROGRESS");
+        DeliveryRouting stop = stopInSubdistrict(job, 10L, "470101");
+        givenStops(job, stop, routing(job, 11L, 2, "NEW", "IN_TRANSIT"));
+        StopActionRequest body = new StopActionRequest("CUSTOMER_ABSENT", null);
+        body.setLocation(new GeoPoint(lat, lng, 10.0));
+
+        //WHEN
+        jobService.skipStop(1L, 10L, body, "admin");
+
+        //THEN
+        assertThat(stop.getRoutingStatus()).isEqualTo("SKIPPED");
+        verify(deliveryJobEventRepository).save(argThat(e -> "STOP_SKIPPED".equals(e.getEventType())
+                && e.getLat() == null && e.getLng() == null && e.getDistanceKm() == null));
+        verify(subdistrictRepository, never()).findByCode(any());
+    }
+
+    @Test
+    void should_keepPositionWithoutDistance_when_customerHasNoSubdistrict() {
+        //GIVEN — boundary: ออเดอร์ไม่มีที่อยู่
+        DeliveryJob job = job(1L, "IN_PROGRESS");
+        DeliveryRouting stop = routing(job, 10L, 1, "NEW", "IN_TRANSIT");
+        givenStops(job, stop, routing(job, 11L, 2, "NEW", "IN_TRANSIT"));
+        StopActionRequest body = new StopActionRequest("CHANGED_MIND", null);
+        body.setLocation(new GeoPoint(17.0, 104.0, null));
+
+        //WHEN
+        jobService.cancelStop(1L, 10L, body, "admin");
+
+        //THEN
+        verify(deliveryJobEventRepository).save(argThat(e -> "STOP_CANCELLED".equals(e.getEventType())
+                && e.getLat() != null && e.getAccuracyM() == null && e.getDistanceKm() == null));
     }
 }
