@@ -373,6 +373,7 @@ public class TeamService {
                 .userId(user.getUserId())
                 .username(user.getUsername())
                 .displayName(name.isEmpty() ? user.getUsername() : name)
+                .pictureUrl(user.getPictureUrl())
                 .build();
     }
 

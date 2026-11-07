@@ -1273,6 +1273,7 @@ public class JobService {
                 .username(driver.getUsername())
                 .displayName(driver.getDisplayName())
                 .phone(manage && people.sameTeam() ? people.driverPhone() : null)
+                .pictureUrl(driver.getPictureUrl())
                 .build();
     }
 
@@ -1311,6 +1312,7 @@ public class JobService {
                 .createdAt(job.getCreatedAt())
                 .ownerUsername(job.getCreatedBy())
                 .ownerDisplayName(people != null && people.owner() != null ? people.owner().getDisplayName() : null)
+                .ownerPictureUrl(people != null && people.owner() != null ? people.owner().getPictureUrl() : null)
                 .assignedDriver(assignedDriverFor(people, manage))
                 .ownerPhone(!manage && people != null && people.sameTeam() ? people.ownerPhone() : null)
                 .myAccess(manage ? JobAccess.MANAGE : JobAccess.OPERATE)

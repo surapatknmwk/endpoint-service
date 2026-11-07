@@ -25,6 +25,9 @@ public class ProfileResponse {
     @Schema(description = "10 digits without dashes; null = not set", example = "0891000001")
     private String phone;
 
+    @Schema(description = "LINE profile picture URL; null when LINE is not linked")
+    private String pictureUrl;
+
     @Schema(description = "Home address; null = no subdistrict set")
     private Address address;
 

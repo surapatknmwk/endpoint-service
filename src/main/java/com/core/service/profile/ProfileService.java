@@ -208,6 +208,7 @@ public class ProfileService {
                 .firstName(me.getFirstName())
                 .lastName(me.getLastName())
                 .phone(me.getPhone())
+                .pictureUrl(me.getPictureUrl())
                 .address(address)
                 .availability(driver ? Optional.ofNullable(profile).map(UserProfile::getAvailabilityStatus)
                         .orElse(DriverAvailability.AVAILABLE) : null)

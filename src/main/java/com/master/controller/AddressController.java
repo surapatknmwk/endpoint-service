@@ -3,6 +3,7 @@ package com.master.controller;
 import com.common.dto.ApiResponse;
 import com.master.dto.*;
 import com.master.service.AddressService;
+import com.master.service.MapLinkService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -19,6 +20,7 @@ import java.util.List;
 public class AddressController {
 
     private final AddressService addressService;
+    private final MapLinkService mapLinkService;
 
     @GetMapping("/info")
     @Operation(summary = "ดึงข้อมูลที่อยู่ตาม code",
@@ -101,5 +103,17 @@ public class AddressController {
     public ResponseEntity<ApiResponse<List<AddressInfoDto>>> getFullAddressInfoBySubdistrictCodeBatch(@RequestBody List<String> subdistrictCodes) {
         List<AddressInfoDto> response = addressService.getFullAddressInfoBySubdistrictCodeBatch(subdistrictCodes);
         return ResponseEntity.ok(ApiResponse.success(response));
+    }
+
+    @GetMapping("/resolve-map-link")
+    @Operation(summary = "ขยายลิงก์ย่อ Google Maps",
+            description = "เปิดลิงก์ย่อ (maps.app.goo.gl) แทนเบราว์เซอร์ แล้วคืนลิงก์เต็ม ให้หน้าเว็บอ่านพิกัดได้ — รับเฉพาะลิงก์ของ Google")
+    @ApiResponses(value = {
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "ได้ลิงก์เต็ม"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400", description = "ไม่ใช่ลิงก์ย่อของ Google Maps"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "502", description = "ติดต่อ Google ไม่ได้")
+    })
+    public ResponseEntity<ApiResponse<MapLinkResponse>> resolveMapLink(@RequestParam String url) {
+        return ResponseEntity.ok(ApiResponse.success(new MapLinkResponse(mapLinkService.resolve(url))));
     }
 }

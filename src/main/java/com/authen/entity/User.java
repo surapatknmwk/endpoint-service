@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.ToString;
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.Formula;
 import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.LocalDateTime;
@@ -55,6 +56,11 @@ public class User {
     // last use of the app — written only by UserRepository.touchLastSeen, never by saving this entity
     @Column(name = "last_seen_at", insertable = false, updatable = false)
     private LocalDateTime lastSeenAt;
+
+    // LINE profile picture (user_identities, refreshed on every LINE login) — read-only, null when LINE is not linked.
+    // Loaded as a sub-select in the same query, so lists of users cost no extra queries.
+    @Formula("(select ui.picture_url from user_identities ui where ui.user_id = user_id and ui.provider = 'LINE')")
+    private String pictureUrl;
 
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)

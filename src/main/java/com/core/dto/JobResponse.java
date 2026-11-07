@@ -48,6 +48,9 @@ public class JobResponse {
     @Schema(description = "Owner's first + last name, or the username", example = "สมศักดิ์ เจ้าของสอง")
     private String ownerDisplayName;
 
+    @Schema(description = "Owner's LINE profile picture URL; null when not linked")
+    private String ownerPictureUrl;
+
     @Schema(description = "The driver who works the job; null = not assigned. phone only for the owner, same team")
     private TeamUserSummary assignedDriver;
 

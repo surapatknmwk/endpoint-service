@@ -4,6 +4,7 @@ import com.master.dto.AddressInfoDto;
 import com.master.dto.AddressInfoRequest;
 import com.master.dto.BatchAddressInfoRequest;
 import com.master.service.AddressService;
+import com.master.service.MapLinkService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -27,11 +28,14 @@ class AddressControllerTest {
     @Mock
     private AddressService addressService;
 
+    @Mock
+    private MapLinkService mapLinkService;
+
     private AddressController controller;
 
     @BeforeEach
     void setUp() {
-        controller = new AddressController(addressService);
+        controller = new AddressController(addressService, mapLinkService);
     }
 
     @Test
