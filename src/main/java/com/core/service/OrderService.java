@@ -1,6 +1,9 @@
 package com.core.service;
 
 import com.core.constant.OrderStatus;
+import com.core.dto.CustomerSuggestionResponse;
+import com.core.dto.GeoPreviewRequest;
+import com.core.dto.GeoPreviewResponse;
 import com.core.dto.OrderRequest;
 import com.core.dto.OrderResponse;
 import com.core.entity.Customer;
@@ -23,6 +26,7 @@ import java.time.Clock;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -43,6 +47,7 @@ public class OrderService {
     private final MasterDataService masterDataService;
     private final Clock clock;
     private final AreaSelectionGuard areaSelectionGuard;
+    private final OrderGeoLocator orderGeoLocator;
 
     @Transactional
     public OrderResponse createOrder(OrderRequest request, String username) {
@@ -107,6 +112,7 @@ public class OrderService {
 
         // Update address
         OrderAddress address = order.getAddress();
+        String locationBefore = geoInputs(address);
         if (!locationLocked) {
             // พื้นที่เดิมที่ถูกปิดไปแล้วเก็บไว้ได้ — เปลี่ยนเป็นพื้นที่ที่ปิดอยู่ไม่ได้ (admin.md US-ADM-06)
             areaSelectionGuard.requireSelectable(areaOf(request), new AreaSelectionGuard.AreaCodes(
@@ -124,6 +130,10 @@ public class OrderService {
                     address.getSubdistrictCode(), request.getAddress().getSubdistrictCode());
         }
         address.setMapLink(request.getAddress().getMapLink());
+        // หาพิกัดใหม่เฉพาะตอนที่อยู่ / ตำบล / ลิงก์แผนที่เปลี่ยน — แก้อย่างอื่นไม่ต้องเรียก Google ซ้ำ
+        if (!Objects.equals(locationBefore, geoInputs(address))) {
+            orderGeoLocator.locate(address, username);
+        }
         address.setUpdatedBy(username);
         orderAddressRepository.save(address);
 
@@ -305,7 +315,75 @@ public class OrderService {
                 .mapLink(request.getAddress().getMapLink())
                 .createdBy(username)
                 .build();
+        orderGeoLocator.locate(address, username);
         return orderAddressRepository.save(address);
+    }
+
+    /** ปุ่ม "ดูแผนที่" ในฟอร์ม order: หมุดที่ order จะได้ถ้าบันทึกตอนนี้ (กฎเดียวกับตอนบันทึก ไม่บันทึกอะไร) */
+    public GeoPreviewResponse previewLocation(GeoPreviewRequest request, String username) {
+        OrderAddress draft = OrderAddress.builder()
+                .addressLine(request.getAddressLine())
+                .subdistrictCode(request.getSubdistrictCode())
+                .zipCode(request.getZipCode())
+                .mapLink(request.getMapLink())
+                .build();
+        OrderGeoLocator.GeoOutcome outcome = orderGeoLocator.resolve(draft, username);
+        return GeoPreviewResponse.builder()
+                .lat(outcome.lat())
+                .lng(outcome.lng())
+                .source(outcome.source())
+                .locationType(outcome.locationType())
+                .note(outcome.note())
+                .build();
+    }
+
+    static final int SUGGESTION_LIMIT = 5;
+    private static final Set<String> SUGGESTION_FIELDS = Set.of("name", "phone", "address");
+
+    /**
+     * ลูกค้าเดิมที่ตรงกับคำที่กำลังพิมพ์ในฟอร์ม order (ชื่อ / เบอร์ / บ้านเลขที่) — เฉพาะออเดอร์ของผู้ใช้เอง ไม่เกิน
+     * {@value #SUGGESTION_LIMIT} รายการ ใหม่สุดก่อน · คำค้นสั้นเกิน (ชื่อ/ที่อยู่ &lt; 2 ตัว, เบอร์ &lt; 3 หลัก) หรือ
+     * field ไม่รู้จัก = รายการว่าง โดยไม่ query DB
+     */
+    @Transactional(readOnly = true)
+    public List<CustomerSuggestionResponse> suggestCustomers(String field, String query, String username) {
+        String key = field == null ? "" : field.trim().toLowerCase();
+        if (!SUGGESTION_FIELDS.contains(key) || query == null) {
+            return List.of();
+        }
+        String term = "phone".equals(key) ? query.replaceAll("\\D", "") : query.trim();
+        if (term.length() < ("phone".equals(key) ? 3 : 2)) {
+            return List.of();
+        }
+        String escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+        // เบอร์: ขึ้นต้นด้วยตัวเลขที่พิมพ์ · ชื่อ/ที่อยู่: มีคำนี้อยู่ตรงไหนก็ได้
+        String pattern = "phone".equals(key) ? escaped + "%" : "%" + escaped + "%";
+        return orderRepository.findCustomerSuggestions(username, key, pattern, SUGGESTION_LIMIT).stream()
+                .map(row -> CustomerSuggestionResponse.builder()
+                        .customerName(row.getCustomerName())
+                        .tel(row.getPhone())
+                        .platformId(row.getPlatformId())
+                        .lastOrderAt(row.getLastOrderAt())
+                        .address(OrderResponse.OrderAddressResponse.builder()
+                                .addressLine(row.getAddressLine())
+                                .provinceCode(row.getProvinceCode())
+                                .provinceName(row.getProvinceName())
+                                .districtCode(row.getDistrictCode())
+                                .districtName(row.getDistrictName())
+                                .subdistrictCode(row.getSubdistrictCode())
+                                .subdistrictName(row.getSubdistrictName())
+                                .zipCode(row.getZipCode())
+                                .mapLink(row.getMapLink())
+                                .build())
+                        .build())
+                .toList();
+    }
+
+    /** ค่าที่ใช้หาพิกัดบ้าน ({@link OrderGeoLocator}) รวมเป็นข้อความเดียว ไว้เทียบว่าเปลี่ยนหรือไม่ */
+    private static String geoInputs(OrderAddress address) {
+        return String.join("|", Objects.toString(address.getAddressLine(), ""),
+                Objects.toString(address.getSubdistrictCode(), ""), Objects.toString(address.getZipCode(), ""),
+                Objects.toString(address.getMapLink(), ""));
     }
 
     private String generateOrderCode() {

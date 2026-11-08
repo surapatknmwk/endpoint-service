@@ -65,4 +65,54 @@ public interface OrderRepository extends JpaRepository<Order, Long>, JpaSpecific
     @Modifying
     @Query("UPDATE Order o SET o.appointmentRemindedDate = o.appointmentDate WHERE o.orderId IN :orderIds")
     int markAppointmentReminded(@Param("orderIds") Collection<Long> orderIds);
+
+    /** แถวของ {@link #findCustomerSuggestions} — ลูกค้า + ที่อยู่จากออเดอร์เก่า (ชื่อพื้นที่ join จากตาราง master) */
+    interface CustomerSuggestionRow {
+        String getCustomerName();
+        String getPhone();
+        Long getPlatformId();
+        String getAddressLine();
+        String getProvinceCode();
+        String getProvinceName();
+        String getDistrictCode();
+        String getDistrictName();
+        String getSubdistrictCode();
+        String getSubdistrictName();
+        String getZipCode();
+        String getMapLink();
+        java.time.LocalDateTime getLastOrderAt();
+    }
+
+    /**
+     * ลูกค้าเดิมของเจ้าของคนนี้ที่ตรงกับคำค้น ในช่องที่กำลังพิมพ์ ({@code field}: name / phone / address) —
+     * ซ้ำกัน (ชื่อ + เบอร์ + ที่อยู่ + ตำบล เดียวกัน) เหลือแถวล่าสุดแถวเดียว แล้วเอาใหม่สุดก่อน · {@code pattern} ต้อง escape
+     * {@code % _ \} มาแล้ว (ใช้ ESCAPE '\') · phone เทียบเฉพาะตัวเลข
+     */
+    @Query(value = "SELECT * FROM ("
+            + " SELECT DISTINCT ON (lower(btrim(c.name)), coalesce(c.phone, ''), lower(btrim(a.address_line)),"
+            + "                     coalesce(a.subdistrict_code, ''))"
+            + "   c.name AS customerName, c.phone AS phone, o.platform_id AS platformId,"
+            + "   a.address_line AS addressLine, a.province_code AS provinceCode, p.name AS provinceName,"
+            + "   a.district_code AS districtCode, d.name AS districtName,"
+            + "   a.subdistrict_code AS subdistrictCode, s.name AS subdistrictName,"
+            + "   a.zip_code AS zipCode, a.map_link AS mapLink, o.created_at AS lastOrderAt"
+            + " FROM orders o"
+            + " JOIN customers c ON c.customer_id = o.customer_id"
+            + " JOIN order_addresses a ON a.address_id = o.address_id"
+            + " LEFT JOIN subdistricts s ON s.code = a.subdistrict_code"
+            + " LEFT JOIN districts d ON d.code = a.district_code"
+            + " LEFT JOIN provinces p ON p.code = a.province_code"
+            + " WHERE o.created_by = :createdBy AND o.status = 'A'"
+            + "   AND CASE :field"
+            + "         WHEN 'name' THEN c.name ILIKE :pattern ESCAPE '\\'"
+            + "         WHEN 'phone' THEN regexp_replace(coalesce(c.phone, ''), '\\D', '', 'g') LIKE :pattern ESCAPE '\\'"
+            + "         ELSE a.address_line ILIKE :pattern ESCAPE '\\'"
+            + "       END"
+            + " ORDER BY lower(btrim(c.name)), coalesce(c.phone, ''), lower(btrim(a.address_line)),"
+            + "          coalesce(a.subdistrict_code, ''), o.created_at DESC"
+            + ") t ORDER BY lastOrderAt DESC LIMIT :limit", nativeQuery = true)
+    List<CustomerSuggestionRow> findCustomerSuggestions(@Param("createdBy") String createdBy,
+                                                        @Param("field") String field,
+                                                        @Param("pattern") String pattern,
+                                                        @Param("limit") int limit);
 }

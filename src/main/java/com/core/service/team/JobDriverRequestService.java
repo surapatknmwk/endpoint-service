@@ -87,6 +87,30 @@ public class JobDriverRequestService {
     // ---- owner ----
 
     /**
+     * "ฉันส่งเอง": เจ้าของเป็นคนส่งงานนี้เอง — มีผลทันที (ไม่มีคำขอ) ยกเลิกคำขอที่รอตอบ และปลดคนส่งที่รับงานไว้ (แจ้งเขา)
+     * · เป็นส่งเองอยู่แล้วและไม่มีคนส่ง/คำขอ = ไม่ทำอะไร · ได้เฉพาะงานที่ยังไม่ออกรถ (NEW) — ผู้เรียกล็อกแถวงานแล้ว
+     */
+    public void deliverMyself(DeliveryJob job, String ownerUsername) {
+        Optional<JobDriverRequest> pending = requestRepository.findPendingForUpdate(job.getJobId());
+        if (job.isOwnerDelivers() && job.getAssignedDriverId() == null && pending.isEmpty()) {
+            return;
+        }
+        if (!JobStatus.NEW.equalsIgnoreCase(job.getDeliveryStatus())) {
+            throw new IllegalArgumentException(JOB_STARTED);
+        }
+        LocalDateTime now = LocalDateTime.now(clock);
+        pending.ifPresent(request -> cancel(request, job, ownerUsername, now));
+        if (job.getAssignedDriverId() != null) {
+            Integer previousDriverId = job.getAssignedDriverId();
+            job.setAssignedDriverId(null);
+            jobAccessService.notifyUnassigned(job, previousDriverId);
+        }
+        job.setOwnerDelivers(true);
+        job.setUpdatedBy(ownerUsername);
+        deliveryJobRepository.save(job);
+    }
+
+    /**
      * The owner picks a driver for a job they already hold locked ({@code PATCH /jobs/{jobId}/driver}).
      * <ul>
      *   <li>the driver who accepted, or the one already asked → nothing changes;</li>
@@ -103,7 +127,7 @@ public class JobDriverRequestService {
                 && (driverUserId.equals(job.getAssignedDriverId()) || driverUserId.equals(askedDriver))) {
             return;
         }
-        if (driverUserId == null && job.getAssignedDriverId() == null && pending.isEmpty()) {
+        if (driverUserId == null && job.getAssignedDriverId() == null && pending.isEmpty() && !job.isOwnerDelivers()) {
             return;
         }
         if (!JobStatus.NEW.equalsIgnoreCase(job.getDeliveryStatus())) {
@@ -118,6 +142,7 @@ public class JobDriverRequestService {
             job.setAssignedDriverId(null);
             jobAccessService.notifyUnassigned(job, previousDriverId);
         }
+        job.setOwnerDelivers(false); // เลือกคนส่ง / ไม่ระบุ = เลิกส่งเอง
         job.setUpdatedBy(ownerUsername);
         deliveryJobRepository.save(job);
 

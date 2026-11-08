@@ -88,6 +88,8 @@ public class OrderResponse {
         private String provinceCode;
         private String provinceName;
         private String zipCode;
+        /** Google Maps link — filled only where the caller needs it (customer suggestions) */
+        private String mapLink;
     }
 
 }

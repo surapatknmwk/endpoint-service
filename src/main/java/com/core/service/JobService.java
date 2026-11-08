@@ -396,13 +396,17 @@ public class JobService {
      * {@link JobDriverRequestService#requestDriver} · ล็อกแถวงานก่อน ให้การเลือกกับการตอบรับของคนส่งทำทีละรายการ
      */
     @Transactional
-    public JobResponse assignDriver(Long jobId, Integer driverUserId, String username) {
+    public JobResponse assignDriver(Long jobId, Integer driverUserId, boolean selfDelivery, String username) {
         DeliveryJob job = deliveryJobRepository.findForUpdate(jobId)
                 .filter(j -> "A".equals(j.getStatus()) && isOwner(j.getCreatedBy(), username))
                 .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
         List<DeliveryRouting> routings = deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(jobId);
         int stopCount = (int) routings.stream().filter(r -> !"CANCELLED".equalsIgnoreCase(r.getRoutingStatus())).count();
-        jobDriverRequestService.requestDriver(job, driverUserId, username, stopCount);
+        if (selfDelivery) {
+            jobDriverRequestService.deliverMyself(job, username);
+        } else {
+            jobDriverRequestService.requestDriver(job, driverUserId, username, stopCount);
+        }
         return mapToResponse(job, routings, username);
     }
 
@@ -898,7 +902,9 @@ public class JobService {
      */
     @Transactional(readOnly = true)
     public List<CandidateOrderResponse> getCandidateOrders(String fromSubdistrictCode,
+                                                             Long fromOrderId,
                                                              String toSubdistrictCode,
+                                                             String filterProvinceCode,
                                                              String filterDistrictCode,
                                                              String filterSubdistrictCode,
                                                              String username) {
@@ -906,9 +912,13 @@ public class JobService {
         Subdistrict to = StringUtils.hasText(toSubdistrictCode)
                 ? resolveSubdistrict(toSubdistrictCode, "Destination")
                 : null;
+        RankPoint fromPoint = referencePoint(from, fromOrderId, username);
 
+        // ปลายทางที่เลือกแค่จังหวัด/อำเภอ = ตัวกรองพื้นที่ (เรียงจากใกล้จุดอ้างอิงเหมือนไม่มีปลายทาง)
         Set<String> provinceCodes = to == null
-                ? Set.of(from.getDistrict().getProvince().getCode())
+                ? Set.of(StringUtils.hasText(filterProvinceCode)
+                        ? filterProvinceCode.trim()
+                        : from.getDistrict().getProvince().getCode())
                 : Stream.of(from.getDistrict().getProvince().getCode(), to.getDistrict().getProvince().getCode())
                         .collect(Collectors.toSet());
         String districtFilter = StringUtils.hasText(filterDistrictCode) ? filterDistrictCode.trim() : null;
@@ -945,7 +955,7 @@ public class JobService {
                     ? BigDecimal.ZERO
                     : estimateDistance(from, to);
         }
-        List<CandidateOrderResponse> shortlist = rankCandidates(candidates, from, to, subdistrictByCode,
+        List<CandidateOrderResponse> shortlist = rankCandidates(candidates, from, fromPoint, to, subdistrictByCode,
                 distanceFromOriginBySubdistrictId, distanceToDestinationBySubdistrictId, originToDestinationKm, false);
 
         // ขั้นที่ 2: เฉพาะตัวที่เข้ารอบ แทนค่าประมาณด้วยระยะถนนจริงจาก Google แล้วเรียงใหม่
@@ -976,8 +986,56 @@ public class JobService {
                 }
             }
         }
-        return rankCandidates(shortlistOrders, from, to, subdistrictByCode,
+        return rankCandidates(shortlistOrders, from, fromPoint, to, subdistrictByCode,
                 distanceFromOriginBySubdistrictId, distanceToDestinationBySubdistrictId, originToDestinationKm, true);
+    }
+
+    /** พิกัด (บ้านลูกค้า หรือกลางตำบล) — null ช่องใดช่องหนึ่ง = ไม่ทราบ */
+    private record RankPoint(BigDecimal lat, BigDecimal lng, boolean precise) {
+    }
+
+    /**
+     * จุดอ้างอิงสำหรับวัดระยะในตำบลเดียวกัน: บ้านลูกค้าของจุดส่งล่าสุด ({@code fromOrderId} — ต้องเป็น order ของผู้ใช้
+     * และอยู่ในตำบล {@code from}) ถ้ามีพิกัด ไม่งั้นกลางตำบล {@code from} (ต้นทางมีแค่ตำบล)
+     */
+    private RankPoint referencePoint(Subdistrict from, Long fromOrderId, String username) {
+        if (fromOrderId != null) {
+            RankPoint home = orderRepository.findById(fromOrderId)
+                    .filter(o -> username != null && username.equals(o.getCreatedBy()))
+                    .map(Order::getAddress)
+                    .filter(a -> from.getCode().equals(a.getSubdistrictCode()))
+                    .map(JobService::homePoint)
+                    .orElse(null);
+            if (home != null) {
+                return home;
+            }
+        }
+        return new RankPoint(from.getLat(), from.getLng(), false);
+    }
+
+    /** พิกัดบ้านลูกค้าที่เก็บไว้ตอนบันทึก order (OrderGeoLocator) — ไม่มี / อ่านไม่ได้ = null */
+    private static RankPoint homePoint(OrderAddress address) {
+        if (address == null || !StringUtils.hasText(address.getLat()) || !StringUtils.hasText(address.getLng())) {
+            return null;
+        }
+        try {
+            return new RankPoint(new BigDecimal(address.getLat().trim()), new BigDecimal(address.getLng().trim()), true);
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+    }
+
+    /** ตำแหน่งของ order: บ้านลูกค้าถ้ามีพิกัด ไม่งั้นกลางตำบล */
+    private static RankPoint orderPoint(OrderAddress address, Subdistrict orderSubdistrict) {
+        RankPoint home = homePoint(address);
+        if (home != null) {
+            return home;
+        }
+        return orderSubdistrict == null ? null : new RankPoint(orderSubdistrict.getLat(), orderSubdistrict.getLng(), false);
+    }
+
+    private static BigDecimal pointDistanceKm(RankPoint a, RankPoint b) {
+        return a == null || b == null ? null : GeoDistance.haversineKm(a.lat(), a.lng(), b.lat(), b.lng());
     }
 
     /**
@@ -1094,7 +1152,8 @@ public class JobService {
                 .build();
     }
 
-    private List<CandidateOrderResponse> rankCandidates(List<Order> orders, Subdistrict from, Subdistrict to,
+    private List<CandidateOrderResponse> rankCandidates(List<Order> orders, Subdistrict from, RankPoint fromPoint,
+                                                          Subdistrict to,
                                                           Map<String, Subdistrict> subdistrictByCode,
                                                           Map<Long, BigDecimal> distanceFromOriginBySubdistrictId,
                                                           Map<Long, BigDecimal> distanceToDestinationBySubdistrictId,
@@ -1110,11 +1169,25 @@ public class JobService {
         Comparator<CandidateOrderResponse> ranking = to == null
                 ? byDistance
                 : (nearestFirst ? byDistance.thenComparing(byDetour) : byDetour.thenComparing(byDistance));
+        // ระยะเท่ากัน (เช่น หลาย order อยู่ตำบลเดียวกัน ได้ระยะคู่ตำบลเดียวกัน) → ใกล้จุดอ้างอิงตามพิกัดจริงก่อน
+        Map<Long, BigDecimal> pointKmByOrderId = new HashMap<>();
+        for (Order order : orders) {
+            OrderAddress address = order.getAddress();
+            Subdistrict orderSubdistrict = address != null && address.getSubdistrictCode() != null
+                    ? subdistrictByCode.get(address.getSubdistrictCode())
+                    : null;
+            BigDecimal km = pointDistanceKm(fromPoint, orderPoint(address, orderSubdistrict));
+            if (km != null) {
+                pointKmByOrderId.put(order.getOrderId(), km);
+            }
+        }
+        Comparator<CandidateOrderResponse> byPoint = Comparator.comparing(
+                c -> pointKmByOrderId.get(c.getOrderId()), Comparator.nullsLast(Comparator.<BigDecimal>naturalOrder()));
         return orders.stream()
-                .map(order -> mapToCandidateResponse(order, from, to, subdistrictByCode,
+                .map(order -> mapToCandidateResponse(order, from, fromPoint, to, subdistrictByCode,
                         distanceFromOriginBySubdistrictId, distanceToDestinationBySubdistrictId,
                         originToDestinationKm))
-                .sorted(ranking)
+                .sorted(ranking.thenComparing(byPoint))
                 .limit(MAX_CANDIDATE_RESULTS)
                 .toList();
     }
@@ -1228,7 +1301,8 @@ public class JobService {
         }
     }
 
-    private CandidateOrderResponse mapToCandidateResponse(Order order, Subdistrict from, Subdistrict to,
+    private CandidateOrderResponse mapToCandidateResponse(Order order, Subdistrict from, RankPoint fromPoint,
+                                                            Subdistrict to,
                                                             Map<String, Subdistrict> subdistrictByCode,
                                                             Map<Long, BigDecimal> distanceFromOriginBySubdistrictId,
                                                             Map<Long, BigDecimal> distanceToDestinationBySubdistrictId,
@@ -1239,6 +1313,16 @@ public class JobService {
                 : null;
 
         BigDecimal distanceFromOriginKm = legDistanceKm(orderSubdistrict, from, distanceFromOriginBySubdistrictId);
+        // ตำบลเดียวกับจุดอ้างอิง: เดิมได้ 0 — ถ้ามีพิกัดบ้านจริงฝั่งใดฝั่งหนึ่ง ใช้ระยะเส้นตรงจากพิกัดแทน
+        if (distanceFromOriginKm != null && distanceFromOriginKm.signum() == 0) {
+            RankPoint point = orderPoint(address, orderSubdistrict);
+            if (point != null && (point.precise() || fromPoint.precise())) {
+                BigDecimal km = pointDistanceKm(fromPoint, point);
+                if (km != null) {
+                    distanceFromOriginKm = km;
+                }
+            }
+        }
 
         BigDecimal detourKm = null;
         if (to != null) {
@@ -1252,7 +1336,9 @@ public class JobService {
                 .orderId(order.getOrderId())
                 .orderCode(order.getOrderCode())
                 .customerName(order.getCustomer() != null ? order.getCustomer().getName() : null)
+                .tel(order.getCustomer() != null ? order.getCustomer().getPhone() : null)
                 .address(mapToAddressResponse(address))
+                .detail(order.getDetail())
                 .orderStatus(order.getOrderStatus())
                 .appointmentDate(order.getAppointmentDate())
                 .distanceKm(distanceFromOriginKm)
@@ -1387,6 +1473,7 @@ public class JobService {
                 .ownerDisplayName(people != null && people.owner() != null ? people.owner().getDisplayName() : null)
                 .ownerPictureUrl(people != null && people.owner() != null ? people.owner().getPictureUrl() : null)
                 .assignedDriver(assignedDriverFor(people, manage))
+                .ownerDelivers(job.isOwnerDelivers() && job.getAssignedDriverId() == null)
                 .ownerPhone(!manage && people != null && people.sameTeam() ? people.ownerPhone() : null)
                 .myAccess(manage ? JobAccess.MANAGE : JobAccess.OPERATE)
                 .driverRequest(manage && requests != null ? requests.pending() : null)

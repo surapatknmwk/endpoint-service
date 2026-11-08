@@ -40,6 +40,17 @@ public class OrderAddress {
     @Column(name = "map_link", length = 500)
     private String mapLink;
 
+    // พิกัดบ้านลูกค้า (เก็บเป็นข้อความตามคอลัมน์เดิม) — เติมโดย OrderGeoLocator ตอนบันทึก, null = ใช้กลางตำบลแทน
+    @Column(name = "lat", length = 50)
+    private String lat;
+
+    @Column(name = "lng", length = 50)
+    private String lng;
+
+    /** ที่มาของ lat/lng: {@code MAP_LINK} / {@code GEOCODE} / null = ไม่มีพิกัด */
+    @Column(name = "geo_source", length = 20)
+    private String geoSource;
+
     @Column(name = "is_default")
     @Builder.Default
     private Boolean isDefault = false;

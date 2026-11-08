@@ -26,6 +26,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -67,7 +68,7 @@ class OrderServiceAdminTest {
     @BeforeEach
     void setUp() {
         orderService = new OrderService(orderRepository, customerRepository, orderAddressRepository,
-                deliveryRoutingRepository, masterDataService, CLOCK, areaSelectionGuard);
+                deliveryRoutingRepository, masterDataService, CLOCK, areaSelectionGuard, mock(OrderGeoLocator.class));
     }
 
     private Order givenOrder(String orderStatus, DeliveryJob... jobs) {

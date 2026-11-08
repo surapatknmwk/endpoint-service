@@ -141,7 +141,7 @@ class JobServiceTeamTest {
         when(deliveryJobRepository.findForUpdate(1L)).thenReturn(Optional.of(job));
         givenStops(job, stop(job, 10L, "NEW", "ASSIGNED"), stop(job, 11L, "CANCELLED", "CANCELLED"));
         //WHEN
-        JobResponse result = jobService.assignDriver(1L, 3, "admin");
+        JobResponse result = jobService.assignDriver(1L, 3, false, "admin");
         //THEN — cancelled stops are not counted in the request
         verify(jobDriverRequestService).requestDriver(job, 3, "admin", 1);
         assertThat(result.getMyAccess()).isEqualTo(JobAccess.MANAGE);
@@ -153,7 +153,7 @@ class JobServiceTeamTest {
         DeliveryJob job = job(1L, "NEW", 3);
         when(deliveryJobRepository.findForUpdate(1L)).thenReturn(Optional.of(job));
         //WHEN / THEN
-        assertThatThrownBy(() -> jobService.assignDriver(1L, null, "driver1"))
+        assertThatThrownBy(() -> jobService.assignDriver(1L, null, false, "driver1"))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("Job not found");
         verify(jobDriverRequestService, never()).requestDriver(any(), any(), anyString(), anyInt());
     }
@@ -181,7 +181,7 @@ class JobServiceTeamTest {
         when(jobDriverRequestService.describe(List.of(job))).thenReturn(Map.of(1L,
                 new JobDriverRequestService.JobRequests(pending, null, List.of(4))));
         //WHEN
-        JobResponse result = jobService.assignDriver(1L, 3, "admin");
+        JobResponse result = jobService.assignDriver(1L, 3, false, "admin");
         //THEN
         assertThat(result.getDriverRequest().getDriver().getUsername()).isEqualTo("driver1");
         assertThat(result.getDeclinedDriverIds()).containsExactly(4);

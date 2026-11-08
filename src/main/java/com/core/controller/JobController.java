@@ -51,17 +51,23 @@ public class JobController {
                     + "toSubdistrictCode (destination-specified mode), ranked by detour "
                     + "(distance(from->order) + distance(order->to) - distance(from->to)) so orders roughly \"on the "
                     + "way\" from origin to destination sort first — candidates restricted to the union of the "
-                    + "origin's and destination's provinces. Either ranking sorts unknown/missing distance data last "
+                    + "origin's and destination's provinces. Without toSubdistrictCode, provinceCode (a destination "
+                    + "picked only down to province/district) restricts candidates to that province instead of the "
+                    + "reference point's. fromOrderId (the last selected stop) lets orders in the same subdistrict be "
+                    + "measured from that customer's saved coordinates instead of the subdistrict centre; ties in "
+                    + "either ranking are broken by straight-line distance between those points. Either ranking sorts unknown/missing distance data last "
                     + "rather than excluding it.")
     @GetMapping("/candidate-orders")
     public ResponseEntity<ApiResponse<List<CandidateOrderResponse>>> getCandidateOrders(
             @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
             @RequestParam String fromSubdistrictCode,
+            @RequestParam(required = false) Long fromOrderId,
             @RequestParam(required = false) String toSubdistrictCode,
+            @RequestParam(required = false) String provinceCode,
             @RequestParam(required = false) String districtCode,
             @RequestParam(required = false) String subdistrictCode) {
         List<CandidateOrderResponse> data = jobService.getCandidateOrders(
-                fromSubdistrictCode, toSubdistrictCode, districtCode, subdistrictCode,
+                fromSubdistrictCode, fromOrderId, toSubdistrictCode, provinceCode, districtCode, subdistrictCode,
                 securityService.extractUsernameFromToken(authHeader));
         return ResponseEntity.ok(ApiResponse.success(data));
     }
@@ -143,6 +149,8 @@ public class JobController {
             description = "Owner only. driverUserId must be an ACTIVE member of the caller's team: the driver is asked "
                     + "(a PENDING request) and gets the job only after accepting; a driver who had accepted is "
                     + "unassigned and a pending request to someone else is cancelled. null unassigns and cancels. "
+                    + "selfDelivery = true makes the owner the deliverer at once (no request; a pending request is "
+                    + "cancelled and a driver unassigned). "
                     + "Only while the job is NEW. The accepted or already-asked driver again changes nothing. The "
                     + "{jobId} name is part of the permission row in db/permissions-team-data.sql.")
     @PatchMapping("/{jobId}/driver")
@@ -151,7 +159,8 @@ public class JobController {
             @PathVariable Long jobId,
             @RequestBody AssignDriverRequest request) {
         String username = securityService.extractUsernameFromToken(authHeader);
-        JobResponse data = jobService.assignDriver(jobId, request.getDriverUserId(), username);
+        JobResponse data = jobService.assignDriver(jobId, request.getDriverUserId(),
+                Boolean.TRUE.equals(request.getSelfDelivery()), username);
         return ResponseEntity.ok(ApiResponse.success(data, "Driver updated"));
     }
 

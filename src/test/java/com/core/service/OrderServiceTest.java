@@ -30,6 +30,8 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -63,7 +65,7 @@ class OrderServiceTest {
     @BeforeEach
     void setUp() {
         orderService = new OrderService(orderRepository, customerRepository, orderAddressRepository,
-                deliveryRoutingRepository, masterDataService, CLOCK, areaSelectionGuard);
+                deliveryRoutingRepository, masterDataService, CLOCK, areaSelectionGuard, mock(OrderGeoLocator.class));
     }
 
     private Order storedOrder(String orderStatus, int sequenceNo) {
@@ -361,5 +363,74 @@ class OrderServiceTest {
         //WHEN / THEN
         assertThatThrownBy(() -> orderService.cancelOrder(1L, "operator"))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("Order not found: 1");
+    }
+
+    // ---------- suggestCustomers ----------
+
+    @Test
+    void should_returnEmptyWithoutQuerying_when_termTooShortOrFieldUnknown() {
+        //GIVEN - nothing
+
+        //WHEN
+        var shortName = orderService.suggestCustomers("name", " ส ", "admin");
+        var shortPhone = orderService.suggestCustomers("phone", "0-8", "admin");
+        var unknownField = orderService.suggestCustomers("email", "somchai", "admin");
+
+        //THEN - no DB round trip for any of them
+        assertThat(shortName).isEmpty();
+        assertThat(shortPhone).isEmpty();
+        assertThat(unknownField).isEmpty();
+        verify(orderRepository, never()).findCustomerSuggestions(any(), any(), any(), anyInt());
+    }
+
+    @Test
+    void should_matchPhoneDigitsFromStart_when_fieldIsPhone() {
+        //GIVEN
+        when(orderRepository.findCustomerSuggestions("admin", "phone", "0812%", OrderService.SUGGESTION_LIMIT))
+                .thenReturn(List.of());
+
+        //WHEN
+        orderService.suggestCustomers("phone", "081-2", "admin");
+
+        //THEN
+        verify(orderRepository).findCustomerSuggestions("admin", "phone", "0812%", OrderService.SUGGESTION_LIMIT);
+    }
+
+    @Test
+    void should_escapeWildcardsAndMatchAnywhere_when_fieldIsName() {
+        //GIVEN - a typed % or _ must not act as a wildcard
+        when(orderRepository.findCustomerSuggestions(any(), any(), any(), anyInt())).thenReturn(List.of());
+
+        //WHEN
+        orderService.suggestCustomers("Name", " 50%_off ", "admin");
+
+        //THEN
+        verify(orderRepository).findCustomerSuggestions("admin", "name", "%50\\%\\_off%", OrderService.SUGGESTION_LIMIT);
+    }
+
+    @Test
+    void should_mapRowToCustomerAndAddress_when_suggestionFound() {
+        //GIVEN
+        OrderRepository.CustomerSuggestionRow row = mock(OrderRepository.CustomerSuggestionRow.class);
+        when(row.getCustomerName()).thenReturn("สมศรี");
+        when(row.getPhone()).thenReturn("0904097806");
+        when(row.getPlatformId()).thenReturn(1L);
+        when(row.getAddressLine()).thenReturn("197 หมู่ 1");
+        when(row.getSubdistrictCode()).thenReturn("440604");
+        when(row.getMapLink()).thenReturn("https://maps.app.goo.gl/x");
+        when(orderRepository.findCustomerSuggestions("admin", "address", "%หมู่ 1%", OrderService.SUGGESTION_LIMIT))
+                .thenReturn(List.of(row));
+
+        //WHEN
+        var result = orderService.suggestCustomers("address", "หมู่ 1", "admin");
+
+        //THEN
+        assertThat(result).singleElement().satisfies(s -> {
+            assertThat(s.getCustomerName()).isEqualTo("สมศรี");
+            assertThat(s.getTel()).isEqualTo("0904097806");
+            assertThat(s.getPlatformId()).isEqualTo(1L);
+            assertThat(s.getAddress().getSubdistrictCode()).isEqualTo("440604");
+            assertThat(s.getAddress().getMapLink()).isEqualTo("https://maps.app.goo.gl/x");
+        });
     }
 }

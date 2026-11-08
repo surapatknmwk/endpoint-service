@@ -114,6 +114,9 @@ google:
   maps:
     api-key: ${GOOGLE_MAPS_API_KEY:}
     routes-base-url: https://routes.googleapis.com
+    # Geocoding API (ที่อยู่ → พิกัดบ้านลูกค้า ตอนบันทึก order ที่ไม่มีหมุดในลิงก์) — key เดียวกัน ต้องเปิด Geocoding API
+    # ใน Google Cloud project ด้วย · นับโควตารายวันร่วมกับ Routes (daily-request-limit ข้างล่าง)
+    geocoding-base-url: https://maps.googleapis.com
     # ค่าเริ่มต้นของเพดานจำนวนครั้งที่ยิง Google Routes API จริงต่อวัน (วันตามเวลา Asia/Bangkok) — ใช้เมื่อตาราง
     # configuration ไม่มีแถว code 'GR_DAILY' (หรือไม่ active/ค่าไม่ถูกต้อง) ค่าจริงแก้ได้ตลอดที่ configuration.value_1
     # ผลที่ cache ไว้ใน subdistrict_distances ไม่นับ; เกินแล้วตอบ 429 (ดูสถิติที่ GET .../google-distance/usage)

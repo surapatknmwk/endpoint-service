@@ -54,6 +54,10 @@ public class JobResponse {
     @Schema(description = "The driver who works the job; null = not assigned. phone only for the owner, same team")
     private TeamUserSummary assignedDriver;
 
+    @Schema(description = "The owner delivers this job themselves (no driver, chosen as \"ฉันส่งเอง\")",
+            example = "false")
+    private boolean ownerDelivers;
+
     @Schema(description = "Owner's phone — only for the assigned driver while in the owner's team; null otherwise",
             example = "0812000002")
     private String ownerPhone;

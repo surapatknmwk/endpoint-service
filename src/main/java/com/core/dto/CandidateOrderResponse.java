@@ -25,8 +25,14 @@ public class CandidateOrderResponse {
     @Schema(description = "Customer name", example = "John Doe")
     private String customerName;
 
+    @Schema(description = "Customer phone (owner-only endpoint)", example = "0812345678")
+    private String tel;
+
     @Schema(description = "Delivery address")
     private OrderResponse.OrderAddressResponse address;
+
+    @Schema(description = "What to deliver (order detail)", example = "ข้าวสาร 2 กระสอบ")
+    private String detail;
 
     @Schema(description = "Order status", example = "PENDING")
     private String orderStatus;

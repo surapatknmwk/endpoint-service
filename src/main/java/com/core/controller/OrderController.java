@@ -1,6 +1,9 @@
 package com.core.controller;
 
 import com.common.dto.ApiResponse;
+import com.core.dto.CustomerSuggestionResponse;
+import com.core.dto.GeoPreviewRequest;
+import com.core.dto.GeoPreviewResponse;
 import com.core.dto.OrderRequest;
 import com.core.dto.OrderResponse;
 import com.core.service.OrderService;
@@ -16,6 +19,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 @RestController
 @RequestMapping("/endpoint-core-service/api/orders")
@@ -48,6 +53,33 @@ public class OrderController {
         OrderResponse data = orderService.createOrder(request, username);
         ApiResponse<OrderResponse> response = ApiResponse.created(data, "Order created successfully");
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
+
+    @Operation(summary = "Preview an order's pin",
+            description = "Where the order would be pinned if saved now: the Google Maps link's pin, else Google "
+                    + "Geocoding of the address (accepted only when precise and within 15 km of the subdistrict "
+                    + "centre), else the subdistrict centre. Nothing is stored. A geocode call counts toward the "
+                    + "daily Google limit shared with Routes.")
+    @PostMapping("/geo-preview")
+    public ResponseEntity<ApiResponse<GeoPreviewResponse>> previewLocation(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
+            @RequestBody GeoPreviewRequest request) {
+        String username = securityService.extractUsernameFromToken(authHeader);
+        return ResponseEntity.ok(ApiResponse.success(orderService.previewLocation(request, username)));
+    }
+
+    @Operation(summary = "Suggest previous customers",
+            description = "The caller's own earlier customers whose name / phone / address line (field = name | phone | "
+                    + "address) matches q — phone matches from the start (digits only), name and address anywhere. "
+                    + "Same customer + address appears once (latest order). At most 5, newest first. q shorter than "
+                    + "2 characters (phone: 3 digits) returns an empty list.")
+    @GetMapping("/customer-suggestions")
+    public ResponseEntity<ApiResponse<List<CustomerSuggestionResponse>>> suggestCustomers(
+            @Parameter(hidden = true) @RequestHeader("Authorization") String authHeader,
+            @RequestParam String field,
+            @RequestParam String q) {
+        String username = securityService.extractUsernameFromToken(authHeader);
+        return ResponseEntity.ok(ApiResponse.success(orderService.suggestCustomers(field, q, username)));
     }
 
     @Operation(summary = "Update an order", description = "Updates an existing order by ID. orderStatus in the body is ignored. "

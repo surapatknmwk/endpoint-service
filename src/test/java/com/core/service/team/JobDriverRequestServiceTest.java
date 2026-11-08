@@ -128,6 +128,89 @@ class JobDriverRequestServiceTest {
                 .requestStatus(status).requestedAt(NOW.minusHours(1)).build();
     }
 
+    // ---- deliverMyself (owner: "ฉันส่งเอง") ----
+
+    @Test
+    void should_becomeSelfDeliveryAtOnce_when_ownerChoosesToDeliverNewJobWithoutDriver() {
+        //GIVEN
+        DeliveryJob job = job("NEW", null);
+        when(requestRepository.findPendingForUpdate(10L)).thenReturn(Optional.empty());
+        //WHEN
+        service.deliverMyself(job, "admin");
+        //THEN — no request, no one notified
+        assertThat(job.isOwnerDelivers()).isTrue();
+        assertThat(job.getUpdatedBy()).isEqualTo("admin");
+        verify(deliveryJobRepository).save(job);
+        verify(requestRepository, never()).insertPending(anyLong(), anyInt(), anyInt(), any(), anyString());
+        verifyNoInteractions(teamNotifier);
+    }
+
+    @Test
+    void should_cancelRequestAndUnassignDriver_when_ownerTakesJobBack() {
+        //GIVEN — a driver accepted and (edge) a stale pending request also exists
+        DeliveryJob job = job("NEW", 3);
+        JobDriverRequest waiting = request(5L, 4, JobDriverRequestStatus.PENDING);
+        when(requestRepository.findPendingForUpdate(10L)).thenReturn(Optional.of(waiting));
+        //WHEN
+        service.deliverMyself(job, "admin");
+        //THEN
+        assertThat(job.isOwnerDelivers()).isTrue();
+        assertThat(job.getAssignedDriverId()).isNull();
+        assertThat(waiting.getRequestStatus()).isEqualTo(JobDriverRequestStatus.CANCELLED);
+        verify(jobAccessService).notifyUnassigned(job, 3);
+    }
+
+    @Test
+    void should_throw_when_ownerChoosesSelfDeliveryAfterJobStarted() {
+        //GIVEN
+        DeliveryJob job = job("IN_PROGRESS", 3);
+        when(requestRepository.findPendingForUpdate(10L)).thenReturn(Optional.empty());
+        //WHEN / THEN
+        assertThatThrownBy(() -> service.deliverMyself(job, "admin")).isInstanceOf(IllegalArgumentException.class);
+        assertThat(job.isOwnerDelivers()).isFalse();
+        verify(deliveryJobRepository, never()).save(any());
+    }
+
+    @Test
+    void should_changeNothing_when_jobIsAlreadySelfDelivered() {
+        //GIVEN — even a started job: nothing to change, so no error
+        DeliveryJob job = job("IN_PROGRESS", null);
+        job.setOwnerDelivers(true);
+        when(requestRepository.findPendingForUpdate(10L)).thenReturn(Optional.empty());
+        //WHEN
+        service.deliverMyself(job, "admin");
+        //THEN
+        verify(deliveryJobRepository, never()).save(any());
+    }
+
+    @Test
+    void should_stopSelfDeliveryAndAskDriver_when_ownerPicksDriverForSelfDeliveredJob() {
+        //GIVEN
+        DeliveryJob job = job("NEW", null);
+        job.setOwnerDelivers(true);
+        when(requestRepository.findPendingForUpdate(10L)).thenReturn(Optional.empty());
+        when(jobAccessService.lockActiveMember("admin", 3)).thenReturn(DRIVER1);
+        when(requestRepository.insertPending(10L, 1, 3, NOW, "admin")).thenReturn(1);
+        //WHEN
+        service.requestDriver(job, 3, "admin", 2);
+        //THEN
+        assertThat(job.isOwnerDelivers()).isFalse();
+        verify(teamNotifier).jobRequested(job, OWNER, DRIVER1, 2);
+    }
+
+    @Test
+    void should_stopSelfDelivery_when_ownerPicksNobodyForSelfDeliveredJob() {
+        //GIVEN — "ไม่ระบุคนส่ง" on a self-delivered job is a real change (not the no-op case)
+        DeliveryJob job = job("NEW", null);
+        job.setOwnerDelivers(true);
+        when(requestRepository.findPendingForUpdate(10L)).thenReturn(Optional.empty());
+        //WHEN
+        service.requestDriver(job, null, "admin", 1);
+        //THEN
+        assertThat(job.isOwnerDelivers()).isFalse();
+        verify(deliveryJobRepository).save(job);
+    }
+
     // ---- requestDriver (owner) ----
 
     @Test

@@ -60,6 +60,11 @@ public class DeliveryJob {
     @Column(name = "assigned_driver_id")
     private Integer assignedDriverId;
 
+    // เจ้าของส่งเอง ("ฉันส่งเอง") — มีความหมายเฉพาะตอนไม่มีคนส่ง · เลือกคนส่ง = false (team.md)
+    @Column(name = "owner_delivers", nullable = false)
+    @Builder.Default
+    private boolean ownerDelivers = false;
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 

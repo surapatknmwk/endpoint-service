@@ -65,10 +65,10 @@ class JobControllerTest {
     void should_passParamsAndExtractedUser_when_gettingCandidateOrders() {
         //GIVEN
         List<CandidateOrderResponse> candidates = List.of(CandidateOrderResponse.builder().build());
-        when(jobService.getCandidateOrders("S-ORIGIN", "S-DEST", "4701", "470101", "admin")).thenReturn(candidates);
+        when(jobService.getCandidateOrders("S-ORIGIN", null, "S-DEST", null, "4701", "470101", "admin")).thenReturn(candidates);
 
         //WHEN
-        var response = controller.getCandidateOrders(AUTH_HEADER, "S-ORIGIN", "S-DEST", "4701", "470101");
+        var response = controller.getCandidateOrders(AUTH_HEADER, "S-ORIGIN", null, "S-DEST", null, "4701", "470101");
 
         //THEN
         assertThat(response.getBody().getData()).isSameAs(candidates);

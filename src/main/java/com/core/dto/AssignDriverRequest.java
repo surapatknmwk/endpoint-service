@@ -16,4 +16,8 @@ public class AssignDriverRequest {
     @Schema(description = "User ID of an ACTIVE member of the caller's team; null = unassign", example = "7",
             nullable = true)
     private Integer driverUserId;
+
+    @Schema(description = "true = the owner delivers it themselves (driverUserId is ignored): no request, takes "
+            + "effect at once, cancels a pending request and unassigns a driver", example = "false", nullable = true)
+    private Boolean selfDelivery;
 }

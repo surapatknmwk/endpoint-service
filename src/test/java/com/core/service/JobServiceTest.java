@@ -176,13 +176,72 @@ class JobServiceTest {
                 .thenReturn(List.of(distance(origin, subA, 5), distance(origin, subB, 2)));
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, null, null, "admin");
 
         //THEN
         assertThat(result).extracting(CandidateOrderResponse::getOrderId).containsExactly(2L, 1L);
         assertThat(result.get(0).getDistanceKm()).isEqualByComparingTo("2");
         assertThat(result.get(0).getDetourKm()).isNull();
         assertThat(result.get(1).getDistanceKm()).isEqualByComparingTo("5");
+    }
+
+    private Order orderAt(long id, Subdistrict subdistrict, String lat, String lng) {
+        Order order = order(id, subdistrict);
+        order.getAddress().setLat(lat);
+        order.getAddress().setLng(lng);
+        return order;
+    }
+
+    @Test
+    void should_rankSameSubdistrictOrdersByHomeCoordinates_when_lastStopHasCoordinates() {
+        //GIVEN - last stop (order 9) and both candidates are in the reference subdistrict
+        Province provinceA = province(1L, "P1");
+        District districtA = district(1L, "D1", provinceA);
+        Subdistrict origin = subdistrict(1L, "S-ORIGIN", districtA);
+        Order lastStop = orderAt(9L, origin, "18.000000", "99.000000");
+        Order far = orderAt(1L, origin, "18.050000", "99.000000");   // ~5.56 km north
+        Order near = orderAt(2L, origin, "18.010000", "99.000000");  // ~1.11 km north
+
+        when(subdistrictRepository.findByCode("S-ORIGIN")).thenReturn(Optional.of(origin));
+        when(orderRepository.findById(9L)).thenReturn(Optional.of(lastStop));
+        when(orderRepository.findCandidateOrdersForJob(eq(Set.of("P1")), eq(null), eq(null), eq("admin"), any(Pageable.class)))
+                .thenReturn(List.of(far, near));
+        when(subdistrictRepository.findAllByCodeIn(Set.of("S-ORIGIN"))).thenReturn(List.of(origin));
+        lenient().when(subdistrictDistanceRepository.findByOriginSubdistrictSubdistrictIdAndDestinationSubdistrictSubdistrictIdIn(
+                eq(1L), anyList())).thenReturn(List.of());
+
+        //WHEN
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", 9L, null, null, null, null, "admin");
+
+        //THEN - nearest home first, and the distance is no longer 0 ("same subdistrict")
+        assertThat(result).extracting(CandidateOrderResponse::getOrderId).containsExactly(2L, 1L);
+        assertThat(result.get(0).getDistanceKm()).isEqualByComparingTo("1.11");
+        assertThat(result.get(1).getDistanceKm()).isEqualByComparingTo("5.56");
+    }
+
+    @Test
+    void should_ignoreLastStopCoordinates_when_lastStopBelongsToAnotherUser() {
+        //GIVEN - order 9 is someone else's: its coordinates must not be used (centroid unknown → distance stays 0)
+        Province provinceA = province(1L, "P1");
+        District districtA = district(1L, "D1", provinceA);
+        Subdistrict origin = subdistrict(1L, "S-ORIGIN", districtA);
+        Order foreign = orderAt(9L, origin, "18.000000", "99.000000");
+        foreign.setCreatedBy("someone-else");
+        Order candidate = orderAt(1L, origin, "18.050000", "99.000000");
+
+        when(subdistrictRepository.findByCode("S-ORIGIN")).thenReturn(Optional.of(origin));
+        when(orderRepository.findById(9L)).thenReturn(Optional.of(foreign));
+        when(orderRepository.findCandidateOrdersForJob(eq(Set.of("P1")), eq(null), eq(null), eq("admin"), any(Pageable.class)))
+                .thenReturn(List.of(candidate));
+        when(subdistrictRepository.findAllByCodeIn(Set.of("S-ORIGIN"))).thenReturn(List.of(origin));
+        lenient().when(subdistrictDistanceRepository.findByOriginSubdistrictSubdistrictIdAndDestinationSubdistrictSubdistrictIdIn(
+                eq(1L), anyList())).thenReturn(List.of());
+
+        //WHEN
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", 9L, null, null, null, null, "admin");
+
+        //THEN
+        assertThat(result).singleElement().satisfies(c -> assertThat(c.getDistanceKm()).isEqualByComparingTo("0"));
     }
 
     @Test
@@ -197,10 +256,30 @@ class JobServiceTest {
                 .thenReturn(List.of());
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, null, null, "admin");
 
         //THEN
         assertThat(result).isEmpty();
+    }
+
+    @Test
+    void should_searchFilterProvinceInsteadOfOriginProvince_when_provinceCodeGivenWithoutDestination() {
+        //GIVEN - origin in P1, destination picked only down to province P2 (+ district D2)
+        Province provinceA = province(1L, "P1");
+        District districtA = district(1L, "D1", provinceA);
+        Subdistrict origin = subdistrict(1L, "S-ORIGIN", districtA);
+
+        when(subdistrictRepository.findByCode("S-ORIGIN")).thenReturn(Optional.of(origin));
+        when(orderRepository.findCandidateOrdersForJob(eq(Set.of("P2")), eq("D2"), eq(null), eq("admin"), any(Pageable.class)))
+                .thenReturn(List.of());
+
+        //WHEN
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, " P2 ", "D2", null, "admin");
+
+        //THEN
+        assertThat(result).isEmpty();
+        verify(orderRepository).findCandidateOrdersForJob(eq(Set.of("P2")), eq("D2"), eq(null),
+                eq("admin"), any(Pageable.class));
     }
 
     @Test
@@ -215,7 +294,7 @@ class JobServiceTest {
                 .thenReturn(List.of());
 
         //WHEN
-        jobService.getCandidateOrders("S-ORIGIN", null, null, null, "admin");
+        jobService.getCandidateOrders("S-ORIGIN", null, null, null, null, null, "admin");
 
         //THEN - the cut happens in the DB (ordered PENDING first, oldest first), not in memory
         verify(orderRepository).findCandidateOrdersForJob(eq(Set.of("P1")), eq(null), eq(null),
@@ -251,7 +330,7 @@ class JobServiceTest {
                 .thenReturn(List.of(distance(origin, destination, 6)));
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", "S-DEST", null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, "S-DEST", null, null, null, "admin");
 
         //THEN
         assertThat(result).hasSize(1);
@@ -288,7 +367,7 @@ class JobServiceTest {
                 .thenReturn(List.of(distance(origin, destination, 2)));
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", "S-DEST", null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, "S-DEST", null, null, null, "admin");
 
         //THEN
         assertThat(result).extracting(CandidateOrderResponse::getOrderId).containsExactly(1L, 2L);
@@ -327,7 +406,7 @@ class JobServiceTest {
                 .thenReturn(List.of());
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", "S-DEST", null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, "S-DEST", null, null, null, "admin");
 
         //THEN — candidate is still returned (not excluded), distanceKm still known, detour unknown
         assertThat(result).hasSize(1);
@@ -364,7 +443,7 @@ class JobServiceTest {
                 .thenReturn(List.of(distance(origin, destination, 5)));
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", "S-DEST", null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, "S-DEST", null, null, null, "admin");
 
         //THEN
         assertThat(result).hasSize(1);
@@ -400,7 +479,7 @@ class JobServiceTest {
                 .thenReturn(List.of());
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", "S-DEST", null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, "S-DEST", null, null, null, "admin");
 
         //THEN
         assertThat(result).extracting(CandidateOrderResponse::getOrderId).containsExactlyInAnyOrder(1L, 2L);
@@ -438,7 +517,7 @@ class JobServiceTest {
         when(subdistrictRepository.findAllByCodeIn(Set.of())).thenReturn(List.of());
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, null, null, "admin");
 
         //THEN
         assertThat(result).hasSize(10);
@@ -478,7 +557,7 @@ class JobServiceTest {
         when(googleRoutesService.findRoute("S-ORIGIN", "S-A")).thenReturn(road(7.25));
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, null, null, "admin");
 
         //THEN
         assertThat(result).hasSize(1);
@@ -500,7 +579,7 @@ class JobServiceTest {
         when(googleRoutesService.findRoute("S-ORIGIN", "S-A")).thenThrow(new ExternalApiException("Google down"));
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, null, null, "admin");
 
         //THEN
         assertThat(result).hasSize(1);
@@ -527,7 +606,7 @@ class JobServiceTest {
                 .thenReturn(Optional.of(storedRoadToB));
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, null, null, "admin");
 
         //THEN
         assertThat(result).extracting(CandidateOrderResponse::getOrderId).containsExactly(1L, 2L);
@@ -551,7 +630,7 @@ class JobServiceTest {
         // Google returns nothing (mock default) so the straight-line estimate must survive
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, null, null, "admin");
 
         //THEN
         BigDecimal expected = GeoDistance.haversineKm(origin.getLat(), origin.getLng(), subA.getLat(), subA.getLng());
@@ -583,7 +662,7 @@ class JobServiceTest {
         when(googleRoutesService.findRoute("S-ORIGIN", "S-DEST")).thenReturn(road(9));
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", "S-DEST", null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, "S-DEST", null, null, null, "admin");
 
         //THEN
         assertThat(result).hasSize(1);
@@ -614,7 +693,7 @@ class JobServiceTest {
                 eq(1L), anyList())).thenReturn(rows);
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, null, null, "admin");
 
         //THEN
         assertThat(result).hasSize(10);
@@ -654,7 +733,7 @@ class JobServiceTest {
                 eq(1L), anyList())).thenReturn(rows);
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, null, null, null, null, "admin");
 
         //THEN
         verify(googleRoutesService, never()).findRoute("S-ORIGIN", "S-11");
@@ -682,7 +761,7 @@ class JobServiceTest {
                 eq(2L), eq(List.of(1L)))).thenReturn(List.of(distance(destination, origin, 10)));
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", "S-DEST", null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, "S-DEST", null, null, null, "admin");
 
         //THEN
         assertThat(result).extracting(CandidateOrderResponse::getOrderId).containsExactly(2L, 1L);
@@ -714,7 +793,7 @@ class JobServiceTest {
                 eq(1L), eq(List.of(2L)))).thenReturn(List.of(distance(origin, destination, 25)));
 
         //WHEN
-        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", "S-DEST", null, null, "admin");
+        List<CandidateOrderResponse> result = jobService.getCandidateOrders("S-ORIGIN", null, "S-DEST", null, null, null, "admin");
 
         //THEN nearest to the reference point first, detour still reported
         assertThat(result).extracting(CandidateOrderResponse::getOrderId).containsExactly(3L, 4L);
