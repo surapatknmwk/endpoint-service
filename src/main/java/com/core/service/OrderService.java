@@ -4,6 +4,7 @@ import com.core.constant.OrderStatus;
 import com.core.dto.OrderRequest;
 import com.core.dto.OrderResponse;
 import com.core.entity.Customer;
+import com.core.entity.DeliveryRouting;
 import com.core.entity.OrderAddress;
 import com.core.entity.Order;
 import com.core.repository.DeliveryRoutingRepository;
@@ -18,6 +19,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Clock;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -39,9 +41,13 @@ public class OrderService {
     private final OrderAddressRepository orderAddressRepository;
     private final DeliveryRoutingRepository deliveryRoutingRepository;
     private final MasterDataService masterDataService;
+    private final Clock clock;
+    private final AreaSelectionGuard areaSelectionGuard;
 
     @Transactional
     public OrderResponse createOrder(OrderRequest request, String username) {
+        // ออเดอร์ใหม่ (รวมคัดลอก) เลือกพื้นที่ที่ผู้ดูแลระบบปิดไว้ไม่ได้ (admin.md US-ADM-06)
+        areaSelectionGuard.requireSelectable(areaOf(request), AreaSelectionGuard.AreaCodes.NONE);
         Customer customer = createCustomer(request.getCustomer(), username);
         OrderAddress address = createAddress(request, username);
 
@@ -101,6 +107,11 @@ public class OrderService {
 
         // Update address
         OrderAddress address = order.getAddress();
+        if (!locationLocked) {
+            // พื้นที่เดิมที่ถูกปิดไปแล้วเก็บไว้ได้ — เปลี่ยนเป็นพื้นที่ที่ปิดอยู่ไม่ได้ (admin.md US-ADM-06)
+            areaSelectionGuard.requireSelectable(areaOf(request), new AreaSelectionGuard.AreaCodes(
+                    address.getProvinceCode(), address.getDistrictCode(), address.getSubdistrictCode()));
+        }
         address.setAddressLine(request.getAddress().getAddressLine());
         if (!locationLocked) {
             address.setSubdistrictCode(request.getAddress().getSubdistrictCode());
@@ -198,12 +209,73 @@ public class OrderService {
     }
 
     /**
+     * ผู้ดูแลระบบลบออเดอร์ (admin.md US-ADM-03) — ลบแบบซ่อน (status 'I') ไม่ลบแถวจริง เพราะประวัติงาน /
+     * จุดส่งของงานที่ปิดแล้วยังอ้างถึง · ไม่ได้ถ้าออเดอร์อยู่ในงานที่ยังไม่ปิด (ลบหรือย้อนที่งานแทน)
+     * ผู้เรียกตรวจสิทธิ์ ADMIN แล้ว
+     */
+    @Transactional
+    public void deleteOrderAsAdmin(Long orderId, String adminUsername) {
+        Order order = findAnyActiveOrder(orderId);
+        refuseIfOnOpenJob(order);
+        order.setStatus("I");
+        order.setUpdatedBy(adminUsername);
+        orderRepository.save(order);
+    }
+
+    /**
+     * ผู้ดูแลระบบย้อนออเดอร์กลับเป็นขั้นแรก "ใหม่" (admin.md US-ADM-03) — จาก PENDING / COMPLETED / CANCELLED / FAILED
+     * ล้างวันที่ส่ง วันนัดที่แจ้งเตือนไปแล้ว (วันนัดเดิมแจ้งเตือนใหม่ได้) และตัวนับการข้าม (skips_reset_at)
+     * · จุดส่งในงานที่ปิดแล้วเก็บไว้เป็นประวัติ
+     * ไม่ได้ถ้าออเดอร์อยู่ในงานที่ยังไม่ปิด (ใช้ "ย้อนงาน" แทน) หรือเป็น NEW อยู่แล้ว · ผู้เรียกตรวจสิทธิ์ ADMIN แล้ว
+     */
+    @Transactional
+    public void resetOrderAsAdmin(Long orderId, String adminUsername) {
+        Order order = findAnyActiveOrder(orderId);
+        if (OrderStatus.NEW.equals(order.getOrderStatus())) {
+            throw new IllegalArgumentException("ออเดอร์นี้อยู่ขั้นแรก (ใหม่) อยู่แล้ว");
+        }
+        refuseIfOnOpenJob(order);
+        order.setOrderStatus(OrderStatus.NEW);
+        order.setDeliveryDate(null);
+        order.setAppointmentRemindedDate(null);
+        // เริ่มนับการข้ามใหม่จาก 0 — ประวัติจุดที่ข้ามในงานเก่ายังอยู่ แต่ไม่นับแล้ว (countSkipsByOrder)
+        order.setSkipsResetAt(LocalDateTime.now(clock));
+        order.setUpdatedBy(adminUsername);
+        orderRepository.save(order);
+    }
+
+    private static AreaSelectionGuard.AreaCodes areaOf(OrderRequest request) {
+        OrderRequest.AddressInfo a = request.getAddress();
+        return a == null ? AreaSelectionGuard.AreaCodes.NONE
+                : new AreaSelectionGuard.AreaCodes(a.getProvinceCode(), a.getDistrictCode(), a.getSubdistrictCode());
+    }
+
+    private Order findAnyActiveOrder(Long orderId) {
+        return orderRepository.findById(orderId)
+                .filter(order -> "A".equals(order.getStatus()))
+                .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
+    }
+
+    /** ออเดอร์ที่อยู่ในงานที่ยังไม่ลบและยังไม่ปิด ต้องจัดการที่งาน — ไม่งั้นจุดส่งกับสถานะออเดอร์จะไม่ตรงกัน */
+    private void refuseIfOnOpenJob(Order order) {
+        deliveryRoutingRepository.findByOrderOrderId(order.getOrderId()).stream()
+                .map(DeliveryRouting::getDeliveryJob)
+                .filter(job -> "A".equals(job.getStatus()) && !"COMPLETED".equalsIgnoreCase(job.getDeliveryStatus()))
+                .findFirst()
+                .ifPresent(job -> {
+                    throw new IllegalArgumentException("ออเดอร์นี้อยู่ในงาน " + job.getJobCode()
+                            + " ที่ยังไม่ปิด — ลบหรือย้อนที่งานแทน");
+                });
+    }
+
+    /**
      * Orders belong to the user who created them. Someone else's order is reported exactly like
      * a missing one, so ids cannot be probed.
      */
     private Order findOwnedOrder(Long orderId, String username) {
         return orderRepository.findById(orderId)
-                .filter(order -> username != null && username.equals(order.getCreatedBy()))
+                // a deleted order (admin.md) is gone for its owner too
+                .filter(order -> username != null && username.equals(order.getCreatedBy()) && "A".equals(order.getStatus()))
                 .orElseThrow(() -> new IllegalArgumentException("Order not found: " + orderId));
     }
 

@@ -21,6 +21,9 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.Clock;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
 
@@ -38,6 +41,10 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class OrderServiceTest {
 
+    private static final LocalDateTime NOW = LocalDateTime.of(2026, 11, 7, 10, 0);
+    private static final Clock CLOCK = Clock.fixed(NOW.atZone(ZoneId.of("Asia/Bangkok")).toInstant(),
+            ZoneId.of("Asia/Bangkok"));
+
     @Mock
     private OrderRepository orderRepository;
     @Mock
@@ -48,13 +55,15 @@ class OrderServiceTest {
     private DeliveryRoutingRepository deliveryRoutingRepository;
     @Mock
     private MasterDataService masterDataService;
+    @Mock
+    private AreaSelectionGuard areaSelectionGuard;
 
     private OrderService orderService;
 
     @BeforeEach
     void setUp() {
         orderService = new OrderService(orderRepository, customerRepository, orderAddressRepository,
-                deliveryRoutingRepository, masterDataService);
+                deliveryRoutingRepository, masterDataService, CLOCK, areaSelectionGuard);
     }
 
     private Order storedOrder(String orderStatus, int sequenceNo) {

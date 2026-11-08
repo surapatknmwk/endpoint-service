@@ -12,6 +12,8 @@ public final class JobEventType {
     public static final String JOB_FINISHED = "JOB_FINISHED";
     // คนส่งคืนงานก่อนเริ่ม (driver-risk ข้อ 16) — reason = DeclineReason
     public static final String JOB_RELEASED = "JOB_RELEASED";
+    // ผู้ดูแลระบบย้อนงานกลับเป็นรอออกรถ (admin.md US-ADM-04)
+    public static final String JOB_RESET = "JOB_RESET";
 
     // รายจุด
     public static final String STOP_COMPLETED = "STOP_COMPLETED";

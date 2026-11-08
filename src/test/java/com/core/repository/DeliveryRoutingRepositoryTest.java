@@ -19,6 +19,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -60,8 +61,12 @@ class DeliveryRoutingRepositoryTest {
     }
 
     private DeliveryJob job(String code, String deliveryStatus, String status) {
+        return job(code, deliveryStatus, status, null);
+    }
+
+    private DeliveryJob job(String code, String deliveryStatus, String status, LocalDateTime completedDate) {
         return em.persist(DeliveryJob.builder().jobCode(code).originSubdistrictCode("470101")
-                .deliveryStatus(deliveryStatus).status(status).totalOrders(0).build());
+                .deliveryStatus(deliveryStatus).status(status).completedDate(completedDate).totalOrders(0).build());
     }
 
     private void stop(DeliveryJob job, Order order, String routingStatus) {
@@ -159,5 +164,43 @@ class DeliveryRoutingRepositoryTest {
 
         //THEN — นับเฉพาะที่ข้ามจริง (มีเหตุผลของคนส่ง หรือข้อมูลก่อนมีเหตุผล)
         assertThat(result).containsEntry(a.getOrderId(), 2L);
+    }
+
+    @Test
+    void should_countOnlySkipsAfterTheReset_when_adminResetTheOrder() {
+        //GIVEN — order A ถูกข้าม 2 ครั้งในงานที่ปิดก่อนผู้ดูแลระบบย้อน (เคยเป็น FAILED) แล้วข้ามอีก 1 ครั้งในงานที่ปิดหลังย้อน
+        LocalDateTime resetAt = LocalDateTime.of(2026, 11, 7, 10, 0);
+        Order a = order("A");
+        a.setSkipsResetAt(resetAt);
+        stop(job("JOB-OLD-1", "COMPLETED", "A", resetAt.minusDays(3)), a, "SKIPPED", "CUSTOMER_ABSENT");
+        stop(job("JOB-OLD-2", "COMPLETED", "A", resetAt.minusDays(1)), a, "SKIPPED", "CUSTOMER_ABSENT");
+        stop(job("JOB-AFTER", "COMPLETED", "A", resetAt.plusDays(1)), a, "SKIPPED", "CUSTOMER_ABSENT");
+        DeliveryJob current = job("JOB-CURRENT", "IN_PROGRESS", "A");
+        stop(current, a, "SKIPPED", "CUSTOMER_ABSENT");
+        em.flush();
+
+        //WHEN
+        Map<Long, Long> result = counts(List.of(a.getOrderId()), current.getJobId());
+
+        //THEN — ประวัติเก่ายังอยู่ แต่นับแค่งานที่ปิดหลังย้อน + งานที่กำลังปิด (completed_date ยังว่าง)
+        assertThat(result).containsEntry(a.getOrderId(), 2L);
+    }
+
+    @Test
+    void should_countNothingOld_when_resetJobIsClosedAgain() {
+        //GIVEN — order A ข้ามในงานเก่า 1 ครั้ง → งานนี้ถูกย้อน (skipsResetAt) → งานนี้กำลังปิดอีกรอบโดยข้าม A
+        LocalDateTime resetAt = LocalDateTime.of(2026, 11, 7, 10, 0);
+        Order a = order("A");
+        a.setSkipsResetAt(resetAt);
+        stop(job("JOB-OLD", "COMPLETED", "A", resetAt.minusDays(2)), a, "SKIPPED", "CUSTOMER_ABSENT");
+        DeliveryJob reset = job("JOB-RESET", "IN_PROGRESS", "A");
+        stop(reset, a, "SKIPPED", "CUSTOMER_ABSENT");
+        em.flush();
+
+        //WHEN
+        Map<Long, Long> result = counts(List.of(a.getOrderId()), reset.getJobId());
+
+        //THEN — 1 ครั้ง (ไม่ใช่ 2) จึงยังไม่ FAILED
+        assertThat(result).containsEntry(a.getOrderId(), 1L);
     }
 }

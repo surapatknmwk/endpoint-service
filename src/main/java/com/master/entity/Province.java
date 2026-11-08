@@ -28,6 +28,16 @@ public class Province {
     @Column(name = "name", nullable = false, length = 100)
     private String name;
 
+    // 'A' = ใช้งาน · 'I' = ผู้ดูแลระบบปิดไว้ — ซ่อนจากตัวเลือกที่อยู่เท่านั้น ค้นด้วย code / id ยังเจอ (admin.md US-ADM-06)
+    @Column(name = "status", nullable = false, length = 1)
+    @Builder.Default
+    private String status = "A";
+
+    /** false = ปิดไว้ — ไม่แสดงในรายการให้เลือก */
+    public boolean isActive() {
+        return !"I".equals(status);
+    }
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 

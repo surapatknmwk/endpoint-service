@@ -29,7 +29,9 @@ public class DistrictService {
     }
 
     public List<DistrictResponse> getDistrictsByProvince(Long provinceId) {
+        // ตัวเลือกอำเภอ — ที่ปิดไว้ไม่แสดง (admin.md US-ADM-06)
         return districtRepository.findByProvinceProvinceId(provinceId).stream()
+                .filter(District::isActive)
                 .map(this::mapToResponse)
                 .toList();
     }
@@ -41,6 +43,7 @@ public class DistrictService {
                 .name(district.getName())
                 .provinceId(district.getProvince().getProvinceId())
                 .provinceName(district.getProvince().getName())
+                .active(district.isActive())
                 .createdAt(district.getCreatedAt())
                 .updatedAt(district.getUpdatedAt())
                 .build();

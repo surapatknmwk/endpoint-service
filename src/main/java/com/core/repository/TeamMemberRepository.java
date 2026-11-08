@@ -66,4 +66,14 @@ public interface TeamMemberRepository extends JpaRepository<TeamMember, Long> {
                                                                           Collection<String> memberStatuses);
 
     List<TeamMember> findByMemberUserIdAndMemberStatusOrderByCreatedAtDesc(Integer memberUserId, String memberStatus);
+
+    /**
+     * Ends every open team row of the user, as owner or member — the admin deleted the account (admin.md US-ADM-02):
+     * INVITED → CANCELLED, ACTIVE → REMOVED.
+     */
+    @Modifying
+    @Query("update TeamMember t set t.memberStatus = case when t.memberStatus = 'INVITED' then 'CANCELLED' "
+            + "else 'REMOVED' end, t.endedAt = :now, t.updatedAt = :now, t.updatedBy = :by "
+            + "where (t.ownerUserId = :userId or t.memberUserId = :userId) and t.memberStatus in ('INVITED', 'ACTIVE')")
+    int endAllOfUser(@Param("userId") Integer userId, @Param("now") LocalDateTime now, @Param("by") String by);
 }

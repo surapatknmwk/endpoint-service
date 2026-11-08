@@ -134,8 +134,14 @@ public class JobDriverRequestService {
 
     /** The owner started or deleted the job itself (G4): a waiting driver is told the request is gone. */
     public void cancelPending(DeliveryJob job, String by) {
+        cancelPending(job, by, true);
+    }
+
+    /** {@code notifyDriver = false}: the admin deleted the job — no message to the driver (admin.md US-ADM-04). */
+    @Transactional
+    public void cancelPending(DeliveryJob job, String by, boolean notifyDriver) {
         requestRepository.findPendingForUpdate(job.getJobId())
-                .ifPresent(request -> cancel(request, job, by, LocalDateTime.now(clock)));
+                .ifPresent(request -> cancel(request, job, by, LocalDateTime.now(clock), notifyDriver));
     }
 
     /**
@@ -417,12 +423,18 @@ public class JobDriverRequestService {
     }
 
     private void cancel(JobDriverRequest request, DeliveryJob job, String by, LocalDateTime now) {
+        cancel(request, job, by, now, true);
+    }
+
+    private void cancel(JobDriverRequest request, DeliveryJob job, String by, LocalDateTime now, boolean notifyDriver) {
         request.setRequestStatus(JobDriverRequestStatus.CANCELLED);
         touch(request, by, now);
         // flushed now: the pending index must be free before a new request is inserted (native insert)
         requestRepository.saveAndFlush(request);
-        userRepository.findById(request.getDriverUserId())
-                .ifPresent(driver -> teamNotifier.jobRequestCancelled(job, driver));
+        if (notifyDriver) {
+            userRepository.findById(request.getDriverUserId())
+                    .ifPresent(driver -> teamNotifier.jobRequestCancelled(job, driver));
+        }
     }
 
     private static void touch(JobDriverRequest request, String by, LocalDateTime now) {

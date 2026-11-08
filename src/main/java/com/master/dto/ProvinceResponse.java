@@ -24,6 +24,11 @@ public class ProvinceResponse {
     @Schema(description = "Province name", example = "กรุงเทพมหานคร")
     private String name;
 
+    @Schema(description = "false = disabled by the admin: not offered in the pickers, still found by code / id "
+            + "(admin.md US-ADM-06) — the webapp shows it as \"(ปิดใช้งาน)\" when it is a record's current value",
+            example = "true")
+    private Boolean active;
+
     @Schema(description = "Created timestamp")
     private LocalDateTime createdAt;
 

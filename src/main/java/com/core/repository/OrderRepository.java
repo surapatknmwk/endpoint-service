@@ -51,6 +51,16 @@ public interface OrderRepository extends JpaRepository<Order, Long>, JpaSpecific
             + "ORDER BY o.createdBy, o.appointmentDate ASC, o.orderId ASC")
     List<Order> findAppointmentsToRemind(@Param("from") LocalDate from, @Param("to") LocalDate to);
 
+    /**
+     * Admin order list (admin.md US-ADM-03): active orders whose code or owner contains {@code pattern}
+     * (lower-case "%text%", "%" = all), newest first. Customer fetched in the same query.
+     */
+    @Query("SELECT o FROM Order o LEFT JOIN FETCH o.customer "
+            + "WHERE o.status = 'A' "
+            + "AND (LOWER(o.orderCode) LIKE :pattern OR LOWER(COALESCE(o.createdBy, '')) LIKE :pattern) "
+            + "ORDER BY o.createdAt DESC, o.orderId DESC")
+    List<Order> searchForAdmin(@Param("pattern") String pattern, Pageable pageable);
+
     /** Marks the orders as reminded for their current appointment date. */
     @Modifying
     @Query("UPDATE Order o SET o.appointmentRemindedDate = o.appointmentDate WHERE o.orderId IN :orderIds")

@@ -27,6 +27,11 @@ public interface UserSessionRepository extends JpaRepository<UserSession, Intege
     @Query("update UserSession s set s.endedReason = :reason where s.user.userId = :userId and s.endedReason is null")
     int endActiveSessions(@Param("userId") Integer userId, @Param("reason") String reason);
 
+    // admin disabled / deleted the account or set a new password (admin.md): every session of the user ends now
+    @Modifying
+    @Query("delete from UserSession s where s.user.userId = :userId")
+    int deleteByUserId(@Param("userId") Integer userId);
+
     // expired sessions are otherwise deleted only when their token is used again
     @Transactional
     @Modifying

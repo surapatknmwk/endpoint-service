@@ -14,6 +14,8 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
+import org.springframework.data.domain.Pageable;
+
 @Repository
 public interface UserRepository extends JpaRepository<User, Integer> {
 
@@ -23,6 +25,15 @@ public interface UserRepository extends JpaRepository<User, Integer> {
     List<User> findByUsernameIgnoreCase(String username);
 
     List<User> findByUsernameIn(Collection<String> usernames);
+
+    /**
+     * Admin user list (admin.md US-ADM-01): not deleted, username or name contains {@code pattern}
+     * (lower-case "%text%", "%" = all), by username.
+     */
+    @Query("select u from User u where u.deletedAt is null and (lower(u.username) like :pattern "
+            + "or lower(coalesce(u.firstName, '')) like :pattern or lower(coalesce(u.lastName, '')) like :pattern) "
+            + "order by u.username")
+    List<User> searchForAdmin(@Param("pattern") String pattern, Pageable pageable);
 
     /** Sets last_seen_at = now unless it is already newer than {@code staleBefore}; returns the rows changed. */
     @Modifying

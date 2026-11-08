@@ -116,6 +116,8 @@ public class JobService {
         }
 
         Subdistrict origin = resolveSubdistrict(request.getOriginSubdistrictCode(), "Origin");
+        // งานใหม่: ต้นทางต้องเป็นตำบลที่ยังเปิดอยู่ (admin.md US-ADM-06)
+        AreaSelectionGuard.requireSelectable(origin, null);
 
         List<Order> orders = orderRepository.findAllById(orderIds);
         if (orders.size() != orderIds.size() || !orders.stream().allMatch(o -> isOwner(o.getCreatedBy(), username))) {
@@ -180,6 +182,8 @@ public class JobService {
             throw new IllegalArgumentException("Job " + jobId + " is already completed and cannot be edited");
         }
         Subdistrict origin = resolveSubdistrict(request.getOriginSubdistrictCode(), "Origin");
+        // ต้นทางเดิมที่ถูกปิดไปแล้วเก็บไว้ได้ — เปลี่ยนเป็นตำบลที่ปิดอยู่ไม่ได้ (admin.md US-ADM-06)
+        AreaSelectionGuard.requireSelectable(origin, job.getOriginSubdistrictCode());
 
         List<DeliveryRouting> existingRoutings = deliveryRoutingRepository.findByDeliveryJobJobId(jobId);
         Map<Long, DeliveryRouting> existingByOrderId = existingRoutings.stream()
@@ -260,8 +264,73 @@ public class JobService {
 
     @Transactional
     public void deleteJob(Long jobId, String username) {
-        DeliveryJob job = findActiveJob(jobId, username);
+        softDelete(findActiveJob(jobId, username), username, true);
+    }
 
+    /**
+     * ผู้ดูแลระบบลบงานของใครก็ได้ — ผลกับงาน / order / คำขอ เหมือนเจ้าของลบ แต่ <b>ไม่แจ้งคนส่ง</b> (ผู้ใช้เลือก 2026-11-08,
+     * admin.md US-ADM-04) · ผู้เรียกตรวจสิทธิ์ ADMIN แล้ว
+     */
+    @Transactional
+    public void deleteJobAsAdmin(Long jobId, String adminUsername) {
+        softDelete(findAnyActiveJob(jobId), adminUsername, false);
+    }
+
+    /**
+     * ผู้ดูแลระบบย้อนงานกลับเป็นขั้นแรก "รอออกรถ" (admin.md US-ADM-04) — ผู้เรียกตรวจสิทธิ์ ADMIN แล้ว
+     * <ul>
+     *   <li>งาน IN_PROGRESS / COMPLETED → NEW, completed_date ว่าง · คนส่งที่รับงานแล้วยังอยู่</li>
+     *   <li>ทุกจุด (รวมจุดที่ส่งแล้ว / ข้าม / ยกเลิก) → NEW ล้างเหตุผล · order ทุกตัว → ASSIGNED ล้างวันที่ส่ง</li>
+     *   <li>ไม่ได้ถ้า order ของงานนี้ถูกจัดเข้างานใหม่กว่าไปแล้ว หรือถูกลบไปแล้ว — จะดึง order กลับมาซ้อนกัน</li>
+     *   <li>ประวัติงานเดิมเก็บไว้ + บันทึก JOB_RESET · ตัวนับการข้ามของทุก order เริ่มใหม่จาก 0 (skips_reset_at)</li>
+     * </ul>
+     */
+    @Transactional
+    public void resetJobAsAdmin(Long jobId, String adminUsername) {
+        DeliveryJob job = deliveryJobRepository.findForUpdate(jobId)
+                .filter(j -> "A".equals(j.getStatus()))
+                .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
+        if (JobStatus.NEW.equalsIgnoreCase(job.getDeliveryStatus())) {
+            throw new IllegalArgumentException("งานนี้อยู่ขั้นแรก (รอออกรถ) อยู่แล้ว");
+        }
+        List<String> movedOn = deliveryRoutingRepository.findOrdersMovedOnFrom(jobId);
+        if (!movedOn.isEmpty()) {
+            throw new IllegalArgumentException("ย้อนงานไม่ได้ ออเดอร์ถูกจัดเข้างานใหม่แล้ว: " + String.join(", ", movedOn));
+        }
+        List<DeliveryRouting> routings = deliveryRoutingRepository.findByDeliveryJobJobIdOrderBySequenceNoAsc(jobId);
+        List<String> deleted = routings.stream().map(DeliveryRouting::getOrder)
+                .filter(o -> !"A".equals(o.getStatus())).map(Order::getOrderCode).toList();
+        if (!deleted.isEmpty()) {
+            throw new IllegalArgumentException("ย้อนงานไม่ได้ ออเดอร์ถูกลบแล้ว: " + String.join(", ", deleted));
+        }
+
+        LocalDateTime now = LocalDateTime.now(clock);
+        for (DeliveryRouting routing : routings) {
+            // สถานะ + เหตุผล + หมายเหตุ (รวมข้อมูลแจ้งยกเลิก) ล้างหมด — จุดไม่มีคอลัมน์เวลา / หลักฐานอื่น
+            setStopStatus(routing, "NEW", null, null, adminUsername);
+            Order order = routing.getOrder();
+            order.setOrderStatus(OrderStatus.ASSIGNED);
+            order.setDeliveryDate(null);
+            order.setSkipsResetAt(now);
+            order.setUpdatedBy(adminUsername);
+            orderRepository.save(order);
+        }
+        job.setDeliveryStatus(JobStatus.NEW);
+        job.setCompletedDate(null);
+        job.setUpdatedBy(adminUsername);
+        deliveryJobRepository.save(job);
+        record(jobId, null, JobEventType.JOB_RESET, null, null, adminUsername);
+    }
+
+    private DeliveryJob findAnyActiveJob(Long jobId) {
+        return deliveryJobRepository.findById(jobId)
+                .filter(j -> "A".equals(j.getStatus()))
+                .orElseThrow(() -> new IllegalArgumentException("Job not found: " + jobId));
+    }
+
+    /** {@code notifyDriver} = แจ้งคนส่งว่าไม่ได้งานนี้แล้ว (เจ้าของลบ) · ผู้ดูแลระบบลบ = ไม่แจ้ง */
+    private void softDelete(DeliveryJob job, String username, boolean notifyDriver) {
+        Long jobId = job.getJobId();
         // งานที่จบแล้ว: order ของจุดที่ข้ามถูกคืนเป็น PENDING ไปแล้ว (อาจอยู่ในงานใหม่) — ห้ามแตะซ้ำ
         boolean jobCompleted = "COMPLETED".equalsIgnoreCase(job.getDeliveryStatus());
         List<DeliveryRouting> routings = deliveryRoutingRepository.findByDeliveryJobJobId(jobId);
@@ -278,8 +347,12 @@ public class JobService {
         job.setUpdatedBy(username);
         deliveryJobRepository.save(job);
         // คนส่งของงานนี้จะไม่เห็นงานแล้ว และคำขอที่รอตอบถูกยกเลิก (design assignConfirm G4) — แจ้งให้รู้
-        jobAccessService.notifyUnassigned(job, job.getAssignedDriverId());
-        jobDriverRequestService.cancelPending(job, username);
+        if (notifyDriver) {
+            jobAccessService.notifyUnassigned(job, job.getAssignedDriverId());
+            jobDriverRequestService.cancelPending(job, username);
+        } else {
+            jobDriverRequestService.cancelPending(job, username, false);
+        }
     }
 
     /**

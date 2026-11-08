@@ -54,6 +54,9 @@ public class OrderSearchService {
                     -> cb.equal(root.get("createdBy"), request.getCreatedBy()));
         }
 
+        // orders deleted by the admin (status 'I', admin.md US-ADM-03) are hidden
+        spec = spec.and((root, query, cb) -> cb.equal(root.get("status"), "A"));
+
         if (!StringUtils.isBlank(request.getCustomerName())) {
             spec = spec.and((root, query, cb) -> {
                 Join<Order, Customer> customerJoin = root.join("customer", JoinType.INNER);

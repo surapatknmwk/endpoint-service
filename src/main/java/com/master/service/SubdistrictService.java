@@ -30,7 +30,9 @@ public class SubdistrictService {
     }
 
     public List<SubdistrictResponse> getSubdistrictsByDistrict(Long districtId) {
+        // ตัวเลือกตำบล — ที่ปิดไว้ไม่แสดง (admin.md US-ADM-06)
         return subdistrictRepository.findByDistrictDistrictId(districtId).stream()
+                .filter(Subdistrict::isActive)
                 .map(this::mapToResponse)
                 .toList();
     }
@@ -46,6 +48,7 @@ public class SubdistrictService {
                 .provinceId(district.getProvince().getProvinceId())
                 .provinceName(district.getProvince().getName())
                 .zipCode(subdistrict.getZipCode())
+                .active(subdistrict.isActive())
                 .createdAt(subdistrict.getCreatedAt())
                 .updatedAt(subdistrict.getUpdatedAt())
                 .build();

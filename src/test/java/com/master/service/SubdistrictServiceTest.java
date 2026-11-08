@@ -110,4 +110,33 @@ class SubdistrictServiceTest {
         //THEN
         assertThat(result).extracting(SubdistrictResponse::getCode).containsExactly("470101", "470102");
     }
+
+    @Test
+    void should_hideDisabledSubdistricts_when_listingForThePicker() {
+        //GIVEN — the admin disabled 470102 (admin.md US-ADM-06)
+        var disabled = subdistrict(470102L, "470102", "ขมิ้น", MUEANG);
+        disabled.setStatus("I");
+        when(subdistrictRepository.findByDistrictDistrictId(4701L)).thenReturn(List.of(
+                subdistrict(470101L, "470101", "ธาตุเชิงชุม", MUEANG), disabled));
+
+        //WHEN
+        List<SubdistrictResponse> result = subdistrictService.getSubdistrictsByDistrict(4701L);
+
+        //THEN
+        assertThat(result).extracting(SubdistrictResponse::getCode).containsExactly("470101");
+    }
+
+    @Test
+    void should_stillFindDisabledSubdistrict_when_lookedUpByCode() {
+        //GIVEN — old orders keep showing the name of a disabled subdistrict
+        var disabled = subdistrict(470102L, "470102", "ขมิ้น", MUEANG);
+        disabled.setStatus("I");
+        when(subdistrictRepository.findByCode("470102")).thenReturn(Optional.of(disabled));
+
+        //WHEN
+        SubdistrictResponse result = subdistrictService.getSubdistrictByCode("470102");
+
+        //THEN
+        assertThat(result.getName()).isEqualTo("ขมิ้น");
+    }
 }

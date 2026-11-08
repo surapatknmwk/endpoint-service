@@ -13,6 +13,7 @@ import com.core.entity.UserProfile;
 import com.core.repository.DeliveryJobRepository;
 import com.core.repository.UserProfileRepository;
 import com.core.service.clients.MasterDataService;
+import com.master.repository.SubdistrictRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -65,13 +66,15 @@ class ProfileServiceTest {
     private DeliveryJobRepository deliveryJobRepository;
     @Mock
     private MasterDataService masterDataService;
+    @Mock
+    private SubdistrictRepository subdistrictRepository;
 
     private ProfileService profileService;
 
     @BeforeEach
     void setUp() {
         profileService = new ProfileService(userRepository, userProfileRepository, deliveryJobRepository,
-                masterDataService, CLOCK);
+                masterDataService, CLOCK, subdistrictRepository);
         lenient().when(masterDataService.findBySubdistrict("470101")).thenReturn(Optional.of(THATCHOENGCHUM));
     }
 
@@ -139,6 +142,39 @@ class ProfileServiceTest {
         assertThat(saved.getValue().getProvinceCode()).isEqualTo("47");
         assertThat(saved.getValue().getAvailabilityStatus()).isEqualTo(DriverAvailability.AVAILABLE);
         assertThat(result.getAddress().getSubdistrictName()).isEqualTo("ธาตุเชิงชุม");
+    }
+
+    private static com.master.entity.Subdistrict disabledThatChoengChum() {
+        com.master.entity.Province p = com.master.entity.Province.builder().code("47").name("สกลนคร").build();
+        com.master.entity.District d = com.master.entity.District.builder().code("4701").name("เมืองสกลนคร").province(p).build();
+        return com.master.entity.Subdistrict.builder().code("470101").name("ธาตุเชิงชุม").district(d).status("I").build();
+    }
+
+    @Test
+    void should_keepDisabledArea_when_profileIsSavedWithItsCurrentSubdistrict() {
+        //GIVEN — the admin disabled 470101 after the driver saved it as home area (admin.md US-ADM-06)
+        loggedIn(3, "driver1", "DRIVER");
+        when(userProfileRepository.findById(3)).thenReturn(Optional.of(
+                UserProfile.builder().userId(3).subdistrictCode("470101").build()));
+        lenient().when(subdistrictRepository.findByCode("470101")).thenReturn(Optional.of(disabledThatChoengChum()));
+        //WHEN
+        profileService.updateMyProfile("driver1", request("0891000001", "45 ถ.สุขเกษม", "470101"));
+        //THEN
+        verify(userProfileRepository).save(any());
+    }
+
+    @Test
+    void should_rejectWithoutSaving_when_profilePicksADisabledSubdistrict() {
+        //GIVEN — no home area yet, the new choice is disabled
+        loggedIn(3, "driver1", "DRIVER");
+        when(userProfileRepository.findById(3)).thenReturn(Optional.empty());
+        when(subdistrictRepository.findByCode("470101")).thenReturn(Optional.of(disabledThatChoengChum()));
+        //WHEN / THEN
+        assertThatThrownBy(() -> profileService.updateMyProfile("driver1", request("0891000001", null, "470101")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ตำบลธาตุเชิงชุม ถูกปิดใช้งานแล้ว");
+        verify(userRepository, never()).save(any());
+        verify(userProfileRepository, never()).save(any());
     }
 
     @Test

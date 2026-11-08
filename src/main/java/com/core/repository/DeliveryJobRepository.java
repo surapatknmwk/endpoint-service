@@ -2,6 +2,7 @@ package com.core.repository;
 
 import com.core.entity.DeliveryJob;
 import jakarta.persistence.LockModeType;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Lock;
@@ -79,6 +80,20 @@ public interface DeliveryJobRepository extends JpaRepository<DeliveryJob, Long>,
             + "where j.status = 'A' and j.deliveryStatus <> 'COMPLETED' "
             + "and j.assignedDriverId = :driverUserId group by j.createdBy")
     List<OpenJobCountByOwner> countOpenAssignedByOwner(@Param("driverUserId") Integer driverUserId);
+
+    /** Active, not completed jobs the user owns (created_by) or is assigned to — blocks deleting the user (admin.md). */
+    @Query("select count(j) from DeliveryJob j where j.status = 'A' and j.deliveryStatus <> 'COMPLETED' "
+            + "and (j.createdBy = :username or j.assignedDriverId = :userId)")
+    long countOpenOfUser(@Param("username") String username, @Param("userId") Integer userId);
+
+    /**
+     * Admin job list (admin.md US-ADM-04): active jobs whose code, name or owner contains {@code pattern}
+     * (lower-case "%text%", "%" = all), newest first.
+     */
+    @Query("select j from DeliveryJob j where j.status = 'A' and (lower(j.jobCode) like :pattern "
+            + "or lower(coalesce(j.jobName, '')) like :pattern or lower(coalesce(j.createdBy, '')) like :pattern) "
+            + "order by j.createdAt desc, j.jobId desc")
+    List<DeliveryJob> searchForAdmin(@Param("pattern") String pattern, Pageable pageable);
 
     interface OpenAssignedJob {
         Integer getDriverUserId();

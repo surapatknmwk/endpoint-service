@@ -89,6 +89,14 @@ public interface JobDriverRequestRepository extends JpaRepository<JobDriverReque
                             @Param("now") LocalDateTime now,
                             @Param("by") String by);
 
+    /** Cancels every pending request to or from the user — the admin deleted the account (admin.md US-ADM-02). */
+    @Modifying
+    @Query("update JobDriverRequest r set r.requestStatus = 'CANCELLED', r.updatedAt = :now, r.updatedBy = :by "
+            + "where (r.ownerUserId = :userId or r.driverUserId = :userId) and r.requestStatus = 'PENDING'")
+    int cancelPendingOfUser(@Param("userId") Integer userId,
+                            @Param("now") LocalDateTime now,
+                            @Param("by") String by);
+
     interface JobDriver {
         Long getJobId();
 

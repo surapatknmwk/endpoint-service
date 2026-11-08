@@ -35,7 +35,9 @@ public class ProvinceService {
     }
 
     public List<ProvinceResponse> getAllProvinces() {
+        // ตัวเลือกจังหวัด — จังหวัดที่ผู้ดูแลระบบปิดไว้ไม่แสดง (admin.md US-ADM-06)
         return provinceRepository.findAll().stream()
+                .filter(Province::isActive)
                 .map(this::mapToResponse)
                 .toList();
     }
@@ -74,6 +76,7 @@ public class ProvinceService {
                 .provinceId(province.getProvinceId())
                 .code(province.getCode())
                 .name(province.getName())
+                .active(province.isActive())
                 .createdAt(province.getCreatedAt())
                 .updatedAt(province.getUpdatedAt())
                 .build();

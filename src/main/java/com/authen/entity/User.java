@@ -57,6 +57,10 @@ public class User {
     @Column(name = "last_seen_at", insertable = false, updatable = false)
     private LocalDateTime lastSeenAt;
 
+    // soft delete by the admin (admin.md US-ADM-02) — null = not deleted; a deleted user is also inactive
+    @Column(name = "deleted_at")
+    private LocalDateTime deletedAt;
+
     // LINE profile picture (user_identities, refreshed on every LINE login) — read-only, null when LINE is not linked.
     // Loaded as a sub-select in the same query, so lists of users cost no extra queries.
     @Formula("(select ui.picture_url from user_identities ui where ui.user_id = user_id and ui.provider = 'LINE')")

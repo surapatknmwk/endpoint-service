@@ -6,6 +6,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
@@ -31,6 +32,24 @@ public class District {
 
     @Column(name = "name", nullable = false, length = 100)
     private String name;
+
+    // จุดศูนย์กลาง (centroid) ของอำเภอ — เติมโดย db/scripts/district_distance_batch.py (sync-districts) หรือผู้ดูแลระบบแก้เอง
+    // (admin.md US-ADM-06) ใช้คำนวณ district_distances — แก้แล้วต้องรัน batch ใหม่ ระยะทางในตารางจึงจะตาม
+    @Column(name = "lat", precision = 9, scale = 6)
+    private BigDecimal lat;
+
+    @Column(name = "lng", precision = 9, scale = 6)
+    private BigDecimal lng;
+
+    // 'A' = ใช้งาน · 'I' = ผู้ดูแลระบบปิดไว้ — ซ่อนจากตัวเลือกที่อยู่เท่านั้น ค้นด้วย code / id ยังเจอ (admin.md US-ADM-06)
+    @Column(name = "status", nullable = false, length = 1)
+    @Builder.Default
+    private String status = "A";
+
+    /** false = ปิดไว้ — ไม่แสดงในรายการให้เลือก */
+    public boolean isActive() {
+        return !"I".equals(status);
+    }
 
     @Column(name = "created_at")
     private LocalDateTime createdAt;

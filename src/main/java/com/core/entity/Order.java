@@ -81,6 +81,10 @@ public class Order {
     @Column(name = "appointment_reminded_date")
     private LocalDate appointmentRemindedDate;
 
+    // ผู้ดูแลระบบย้อนออเดอร์ / งานของออเดอร์ (admin.md) — การข้ามในงานที่ปิดก่อนเวลานี้ไม่นับแล้ว (null = ไม่เคย)
+    @Column(name = "skips_reset_at")
+    private LocalDateTime skipsResetAt;
+
     @Column(name = "status", length = 1)
     @Builder.Default
     private String status = "A";

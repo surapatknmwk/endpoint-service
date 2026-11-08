@@ -12,7 +12,9 @@ import com.core.dto.master.AddressInfoDto;
 import com.core.entity.UserProfile;
 import com.core.repository.DeliveryJobRepository;
 import com.core.repository.UserProfileRepository;
+import com.core.service.AreaSelectionGuard;
 import com.core.service.clients.MasterDataService;
+import com.master.repository.SubdistrictRepository;
 import com.core.service.team.TeamService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -52,6 +54,7 @@ public class ProfileService {
     private final DeliveryJobRepository deliveryJobRepository;
     private final MasterDataService masterDataService;
     private final Clock clock;
+    private final SubdistrictRepository subdistrictRepository;
 
     @Transactional(readOnly = true)
     public ProfileResponse getMyProfile(String username) {
@@ -75,12 +78,19 @@ public class ProfileService {
         AddressInfoDto area = subdistrictCode == null ? null : masterDataService.findBySubdistrict(subdistrictCode)
                 .orElseThrow(() -> new IllegalArgumentException(SUBDISTRICT_NOT_FOUND));
 
+        Optional<UserProfile> existing = userProfileRepository.findById(me.getUserId());
+        if (subdistrictCode != null) {
+            // ที่อยู่ประจำเดิมที่ถูกปิดไปแล้วเก็บไว้ได้ — เลือกตำบลที่ปิดอยู่เป็นค่าใหม่ไม่ได้ (admin.md US-ADM-06)
+            String current = existing.map(UserProfile::getSubdistrictCode).orElse(null);
+            subdistrictRepository.findByCode(subdistrictCode)
+                    .ifPresent(chosen -> AreaSelectionGuard.requireSelectable(chosen, current));
+        }
+
         me.setFirstName(blankToNull(request.getFirstName()));
         me.setLastName(blankToNull(request.getLastName()));
         me.setPhone(phone);
         userRepository.save(me);
 
-        Optional<UserProfile> existing = userProfileRepository.findById(me.getUserId());
         UserProfile profile = existing.orElse(null);
         if (area != null || profile != null) {
             profile = profile != null ? profile : newProfile(me.getUserId());
